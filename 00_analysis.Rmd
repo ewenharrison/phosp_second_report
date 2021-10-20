@@ -1,0 +1,144 @@
+---
+title: "PHOSP-Covid Second Report"
+author: "PHOSP-COVID collaborative"
+date: "20/10/2021"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+if (knitr::is_html_output()){
+  knitr::opts_chunk$set(echo = TRUE,
+                        warning = FALSE,
+                        message = FALSE)
+} else {
+  knitr::opts_chunk$set(echo = FALSE,
+                        warning = FALSE,
+                        message = FALSE)
+}
+
+library(finalfit)
+library(knitr)
+library(tidyverse)
+library(rmarkdown)
+library(cluster)
+library(ggh4x)
+
+summary_factorlist <- purrr::partial(finalfit::summary_factorlist, na_to_prop = FALSE)
+```
+
+## Preample
+Run once to create bundle of data objects.
+
+```{r}
+datadir = "/home/common/phosp/cleaned/full/"
+timestamp = "2021-10-06_0400"
+phosp   = read_rds(paste0(datadir, "phosp_", timestamp, "_full.rds"))
+phosp_tc   = read_rds(paste0(datadir, "phosp_tc_", timestamp, "_full.rds")) # n = 170
+phosp_ids_to_exclude = read_csv("/home/common/phosp/share/phosp_ids_to_exclude_12-10-21.txt") # n = 38
+rm(datadir)
+```
+
+## Define dataset
+```{r}
+phosp = phosp %>% 
+  filter(tier == 2) %>%
+  filter(!study_id %in% phosp_ids_to_exclude$study_id)
+
+rm(phosp_ids_to_exclude)
+```
+
+## Remove out of date range patients
+```{r}
+drop_out_of_range_study_id = phosp %>% 
+  mutate(discharge_to_review = crf3b_date_visit - crf1a_date_dis) %>% 
+  filter(
+    (redcap_event_name== "3 Months (1st Research Visit)" &
+       (discharge_to_review < 42 | discharge_to_review >= 240)
+    ) |
+      (redcap_event_name== "12 Months (2nd Research Visit)" &
+         (discharge_to_review < 300)
+      )
+  ) %>% 
+  pull(study_id)
+# n = 54
+
+rm(drop_out_of_range_study_id )
+```
+
+
+## Add True Colours data
+```{r}
+# Match TC to 3 and 12 months
+## The prep file for TC removes TC done on same day. 
+## But there are still multiple TC questionnaires that match +/- 28 days
+
+explanatory_hrqol = c(
+  "gad7_summary",
+  "phq9_summary",
+  "pcl5_summary",
+  "dyspnoea12_summary",
+  "facit_item_total"
+)
+
+explanatory_tc = c(
+  "gad7_summary_tc",
+  "phq9_summary_tc",
+  "pcl5_summary_tc",
+  "d12_summary_tc",
+  "facit_v4_summary_tc"
+)
+
+phosp_tc_match = phosp %>% 
+  left_join(phosp_tc %>% 
+              select(study_id, 
+                     date_tc,
+                     all_of(explanatory_tc)), by = "study_id") %>% 
+  # Difference between clinic visit and TC
+  mutate(date_tc_delta = (date_tc - crf3b_date_visit) %>% as.numeric()) %>% 
+  # relocate(study_id, redcap_event_name, crf3b_date_visit, date_tc, date_tc_delta) %>% # tmp to manually inspect
+  # Keep +/- 28 days
+  filter(
+    (date_tc_delta >= 0 & date_tc_delta <= 28) |
+      (date_tc_delta < 0 & date_tc_delta >= -28)
+  ) %>% 
+  mutate(
+    gad7_summary = if_else(is.na(gad7_summary), gad7_summary_tc, gad7_summary),
+    phq9_summary = if_else(is.na(phq9_summary), phq9_summary_tc, phq9_summary),
+    pcl5_summary = if_else(is.na(pcl5_summary), pcl5_summary_tc, pcl5_summary),
+    dyspnoea12_summary = if_else(is.na(dyspnoea12_summary), d12_summary_tc, dyspnoea12_summary),
+    facit_item_total = if_else(is.na(facit_item_total), facit_v4_summary_tc, facit_item_total)
+  ) %>% 
+  # Check at this point
+  # select(study_id, redcap_event_name, crf3b_date_visit, date_tc, date_tc_delta,
+  #        all_of(explanatory_tc), all_of(explanatory_hrqol))
+  
+  # More than one TC match for a given clinic, take earlier
+  arrange(study_id, date_tc) %>% 
+  group_by(study_id) %>% 
+  slice(1) %>% 
+  
+  # This selection should match variable number with phosp_working
+  select(-c(date_tc, date_tc_delta, explanatory_tc))
+# 2425 variables in both phosp_tc_match and phosp
+
+# Finish by replacing these patients in phosp_working
+phosp_tc_match_study_id_event = phosp_tc_match %>% 
+  mutate(drop = paste0(study_id, crf3b_date_visit)) %>% 
+  pull(drop)
+
+phosp_working_tc_match = phosp %>% 
+  mutate(drop = paste0(study_id, crf3b_date_visit)) %>% 
+  filter(!drop %in% phosp_tc_match_study_id_event) %>% 
+  select(-drop) %>% 
+  bind_rows(phosp_tc_match)
+# Check this match row total for phosp_working
+# 88551 x 2425
+
+phosp = phosp_working_tc_match %>% 
+  ff_relabel_df(phosp)
+
+rm(phosp_tc, phosp_working_tc_match, phosp_tc_match, phosp_tc_match_study_id_event, explanatory_tc)
+```
+
+
+
