@@ -23,11 +23,12 @@ library(rmarkdown)
 library(cluster)
 library(ggh4x)
 
+source("https://raw.githubusercontent.com/SurgicalInformatics/phosp_clean/main/02_functions.R")
+
 summary_factorlist <- purrr::partial(finalfit::summary_factorlist, na_to_prop = FALSE)
 ```
 
 ## Preample
-Run once to create bundle of data objects.
 
 ```{r}
 datadir = "/home/common/phosp/cleaned/full/"
@@ -49,8 +50,10 @@ rm(phosp_ids_to_exclude)
 
 ## Remove out of date range patients
 ```{r}
+phosp = phosp %>% 
+  mutate(discharge_to_review = (crf3b_date_visit - crf1a_date_dis) %>% as.numeric())
+
 drop_out_of_range_study_id = phosp %>% 
-  mutate(discharge_to_review = crf3b_date_visit - crf1a_date_dis) %>% 
   filter(
     (redcap_event_name== "3 Months (1st Research Visit)" &
        (discharge_to_review < 42 | discharge_to_review >= 240)
@@ -77,7 +80,7 @@ explanatory_hrqol = c(
   "phq9_summary",
   "pcl5_summary",
   "dyspnoea12_summary",
-  "facit_item_total"
+  "facit_v4_summary"
 )
 
 explanatory_tc = c(
@@ -106,7 +109,7 @@ phosp_tc_match = phosp %>%
     phq9_summary = if_else(is.na(phq9_summary), phq9_summary_tc, phq9_summary),
     pcl5_summary = if_else(is.na(pcl5_summary), pcl5_summary_tc, pcl5_summary),
     dyspnoea12_summary = if_else(is.na(dyspnoea12_summary), d12_summary_tc, dyspnoea12_summary),
-    facit_item_total = if_else(is.na(facit_item_total), facit_v4_summary_tc, facit_item_total)
+    facit_v4_summary = if_else(is.na(facit_v4_summary), facit_v4_summary_tc, facit_v4_summary)
   ) %>% 
   # Check at this point
   # select(study_id, redcap_event_name, crf3b_date_visit, date_tc, date_tc_delta,
@@ -139,6 +142,1171 @@ phosp = phosp_working_tc_match %>%
 
 rm(phosp_tc, phosp_working_tc_match, phosp_tc_match, phosp_tc_match_study_id_event, explanatory_tc)
 ```
+
+## Define data objects
+
+### Hospital admission event subgroup
+
+```{r}
+phosp_hosp = phosp %>% 
+  filter(is.na(redcap_repeat_instance)) %>% 
+  filter(redcap_event_name == "Hospital Discharge") %>% 
+  purrr::discard(~all(is.na(.))) %>% 
+  
+  # Add in BMI
+  left_join(phosp %>% 
+              filter(redcap_event_name == "3 Months (1st Research Visit)") %>% 
+              select(study_id, crf3a_bmi, crf3a_bmi_2levels, crf3a_bmi_5levels) %>% 
+              drop_na(crf3a_bmi)
+  ) %>% 
+  
+  # Add smoking
+  left_join(phosp %>% 
+              filter(redcap_event_name == "3 Months (1st Research Visit)" |
+                     redcap_event_name== "6 Weeks") %>% 
+              select(study_id, patient_sq_n) %>% 
+              drop_na(patient_sq_n) %>% 
+              group_by(study_id) %>% 
+              slice(1)
+  )
+```
+
+### "3 month" subgroup
+
+```{r}
+phosp_3m = phosp %>%
+  filter(redcap_event_name== "3 Months (1st Research Visit)") %>%
+  filter(is.na(redcap_repeat_instance)) %>%
+  purrr::discard(~all(is.na(.)))
+```
+
+### Make psq_recovered and discharge to review in phosp_hosp 3 month data
+```{r}
+phosp_hosp = phosp_hosp %>% 
+  left_join(phosp_3m %>% select(study_id, psq_recovered, discharge_to_review)) %>% 
+    mutate(
+    psq_recovered = fct_recode(psq_recovered, "No" = "Not sure") %>% 
+      fct_relevel("No")
+    )
+```
+
+### Walk test
+
+```{r}
+# Walk test instrument ---------------------------------------------------
+phosp_wt = phosp %>% 
+  filter(redcap_repeat_instrument == "Walk Test - 6 Min / ISWT 15 Level") %>%
+  purrr::discard(~all(is.na(.))) %>% 
+  left_join(phosp %>% select(study_id, crf3a_bmi) %>% drop_na()) %>% 
+  
+  # Make ISWT predicited and percent predicted
+  mutate(
+    wt_distance = parse_number(wt_distance), 
+    
+    wt_iswt_predicted = 1449.701 - 
+      (11.735 * age_admission) + 
+      (241.897 * (crf1a_sex %>% as.numeric() %>% {. - 2} %>% abs())) - # female = 0
+      (5.686 * crf3a_bmi) %>% 
+      ff_label("ISWT predicted"),
+    
+    wt_iswt_predicted_perc = (100 * wt_distance / wt_iswt_predicted) %>% 
+      ff_label("ISWT % predicted"),
+  ) %>% 
+  ff_relabel_df(phosp)
+```
+
+### KCO
+
+```{r}
+source("https://raw.githubusercontent.com/SurgicalInformatics/phosp_clean/main/05_kco.R")
+```
+
+## Impute missing data including psq_recovered
+
+```{r}
+## Multiple imputation
+library(mice)
+```
+
+```{r eval=FALSE, include=FALSE}
+# Run mice
+set.seed(1)
+explanatory = c("age_admission", 
+                "crf1a_sex", 
+                "crf1b_eth_5levels", 
+                "imd_quintile",
+                "crf3a_bmi",
+                
+                "crf1a_resp_support_4levels",
+                
+                # Comorbidities - # None of these are imputed as missing considered absent
+                "no_comorbid",
+                "no_comorbid_3levels",
+                "crf1a_com_card", "crf1a_com_neupsy",
+                "crf1a_com_res", "crf1a_com_rheu",
+                "crf1a_com_gast", "crf1a_com_mer", 
+                "crf1a_com_mh", "crf1a_com_diab",
+                "crf1a_com_id",
+                
+                "crf1a_admission_duration",
+                
+                "crf1a_treat_ss", "crf1a_treat_at", "crf1a_treat_tdac",
+                "psq_recovered",
+                
+                "study_id",
+                "redcap_data_access_group",
+                
+                "discharge_to_review")
+
+
+# Choose not to impute missing values
+# for explanatory variable of interest and
+# outcome variable. 
+# But include in algorithm for imputation.
+predM = phosp_hosp %>% 
+  select(explanatory) %>% 
+  missing_predictorMatrix(
+    drop_from_imputed = c("study_id", "redcap_data_access_group"), 
+    drop_from_imputer = c("study_id", "redcap_data_access_group", "discharge_to_review"))
+
+# This is needed to drop from imputed!
+m0 = mice(phosp_hosp %>% 
+  select(explanatory), maxit=0)
+m0$method[c("study_id")] = ""
+m0$method[c("redcap_data_access_group")] = ""
+
+phosp_hosp_imputed = phosp_hosp %>% 
+  select(explanatory) %>% 
+  mice(m = 10, maxit = 10, predictorMatrix = predM, method = m0$method)
+
+plot(phosp_hosp_imputed)
+summary(phosp_hosp_imputed)
+path = paste0("/home/common/phosp/share/phosp_hosp_imputed_", timestamp, ".rds") 
+saveRDS(phosp_hosp_imputed, file = path)
+system(paste("chown :covid", path))
+```
+
+```{r}
+# Load mice sets
+path = paste0("/home/common/phosp/share/phosp_hosp_imputed_", timestamp, ".rds") 
+phosp_hosp_imputed = readRDS(path)
+```
+
+## Paper 1 regression 
+
+## Multivariable logistic regression (with BMI 2 levels AND discharge_to_review)
+
+```{r}
+dependent = "psq_recovered"
+explanatory = c("age_admission_factor", "crf1a_sex", "crf1b_eth_5levels", "imd_quintile", "no_comorbid_3levels", "crf3a_bmi_2levels", "crf1a_resp_support_4levels", "crf1a_treat_ss", "crf1a_treat_at", "crf1a_treat_tdac", "discharge_to_review")
+explanatory_multi = c("age_admission", "crf1a_sex", "crf1b_eth_5levels", "imd_quintile", "no_comorbid_3levels")
+
+fit_cc = phosp_hosp %>% 
+  finalfit(dependent, explanatory, keep_fit_id = TRUE)
+
+fit_multi_imputed_pool = phosp_hosp_imputed %>% 
+  mice::complete("all") %>%
+  # Probably temp. Add age_admission_factor to imputed datasets
+  purrr::map(~ mutate(., 
+                      age_admission_factor = case_when(
+                        age_admission < 30 ~ "<30",
+                        age_admission < 40 ~ "30-39",
+                        age_admission < 50 ~ "40-49",
+                        age_admission < 60 ~ "50-59",
+                        age_admission < 70 ~ "60-69",
+                        age_admission < 80 ~ "70-79",
+                        is.na(age_admission) ~ NA_character_,
+                        TRUE ~ "80+"
+                      ) %>% 
+                        fct_relevel("50-59"),
+                      
+                      crf3a_bmi_2levels = case_when(
+                        crf3a_bmi < 30 ~ "BMI < 30 kg/m^2",
+                        is.na(crf3a_bmi) ~ NA_character_,
+                        TRUE ~ "BMI 30+ kg/m^2"
+                      ) %>% 
+                        factor() %>% 
+                        fct_relevel("BMI < 30 kg/m^2", "BMI 30+ kg/m^2") %>% 
+                        ff_label("BMI (2 levels)")
+  )
+  ) %>% 
+  purrr::map(~ glmmulti(.x, dependent, explanatory)) %>%
+  as.mira() %>% 
+  pool()
+
+
+# Multilevel
+library(broom.mixed)
+fit_mixed_imputed_pool = phosp_hosp_imputed %>% 
+  mice::complete("all") %>%
+  # Probably temp. Add age_admission_factor to imputed datasets
+  purrr::map(~ mutate(., 
+               age_admission_factor = case_when(
+                 age_admission < 30 ~ "<30",
+                 age_admission < 40 ~ "30-39",
+                 age_admission < 50 ~ "40-49",
+                 age_admission < 60 ~ "50-59",
+                 age_admission < 70 ~ "60-69",
+                 age_admission < 80 ~ "70-79",
+                 is.na(age_admission) ~ NA_character_,
+                 TRUE ~ "80+"
+               ) %>% 
+                 fct_relevel("50-59"),
+               
+               crf3a_bmi_2levels = case_when(
+                 crf3a_bmi < 30 ~ "BMI < 30 kg/m^2",
+                 is.na(crf3a_bmi) ~ NA_character_,
+                 TRUE ~ "BMI 30+ kg/m^2"
+               ) %>% 
+                 factor() %>% 
+                 fct_relevel("BMI < 30 kg/m^2", "BMI 30+ kg/m^2") %>% 
+                 ff_label("BMI (2 levels)"))
+  ) %>% 
+  purrr::map(~ glmmixed(.x, dependent, explanatory, random_effect = "redcap_data_access_group")) %>%
+  as.mira() %>% 
+  pool()
+
+fit_multi_imputed = fit_multi_imputed_pool%>% 
+  fit2df(estimate_name = "OR (multivariable imputation)", exp = TRUE)
+
+fit_mixed_imputed = fit_mixed_imputed_pool%>% 
+  fit2df(estimate_name = "OR (multilevel imputation)", exp = TRUE)
+  
+fit_cc %>% 
+  # ff_merge(fit_uni_imputed) %>% 
+  ff_merge(fit_multi_imputed) %>% 
+  ff_merge(fit_mixed_imputed, last_merge = TRUE) %>% 
+  # dplyr::relocate(1, 2, 3, 4, 5, 7, 6, 8) %>% 
+  mytable()
+```
+
+
+## Figure: Multilevel logistic regression (multiple imputation)
+
+```{r fig.height=7, fig.width=12}
+dependent = "psq_recovered"
+explanatory = c("age_admission_factor", "crf1a_sex", "crf1b_eth_5levels", "imd_quintile", "no_comorbid_3levels", "crf3a_bmi_2levels", "crf1a_resp_support_4levels", "crf1a_treat_ss", "crf1a_treat_at", "crf1a_treat_tdac", "discharge_to_review")
+
+fit = phosp_hosp %>%
+  or_plot(dependent, explanatory, column_space = c(-0.5, 0.15, 0.5), table_text_size = 4, 
+          glmfit = fit_mixed_imputed_pool,
+          dependent_label = "", suffix = "",
+          breaks = c(0.2, 0.5, 1, 2, 5, 10, 30), )
+# PDF 10 x 9
+```
+
+
+## Alternative figure with fewer variables (model the same)
+
+```{r fig.height=7, fig.width=12}
+dependent = "psq_recovered"
+explanatory = c("age_admission_factor", "crf1a_sex", "crf1b_eth_5levels", "imd_quintile", "no_comorbid_3levels", "crf3a_bmi_2levels", "crf1a_resp_support_4levels", "crf1a_treat_ss", "discharge_to_review")
+
+fit = phosp_hosp %>%
+  or_plot(dependent, explanatory, column_space = c(-0.5, 0.15, 0.5), table_text_size = 4, 
+          glmfit = fit_mixed_imputed_pool,
+          dependent_label = "", suffix = "",
+          breaks = c(0.2, 0.5, 1, 2, 5, 10, 30), )
+# PDF 10 x 9
+```
+
+
+
+
+## Paper 1 clustering
+
+### Number of patients in clustering
+
+```{r}
+explanatory_hrqol = c(
+  "gad7_summary",
+  "phq9_summary",
+  "pcl5_summary",
+  "dyspnoea12_summary",
+  "facit_v4_summary",
+  "sppb_score",
+  "mocal_total"
+)
+
+phosp_3m %>% 
+  select(explanatory_hrqol) %>%
+  missing_glimpse() %>% 
+  mytable()
+
+phosp_3m %>% 
+  select(explanatory_hrqol) %>%
+  drop_na() %>% 
+  count(name = "Complete cases") 
+```
+
+
+```{r fig.height=7, fig.width=11}
+# Normalise
+library(recipes)
+set.seed(1234)
+clara_result = phosp_3m %>% 
+  select(study_id, explanatory_hrqol) %>% 
+  drop_na() %T>% 
+  {data_in <<- .} %>% 
+  select(-study_id) %>% 
+  recipe(~ .) %>% 
+  step_normalize(all_numeric()) %>% 
+  prep() %>% 
+  juice() %>% 
+  mutate(across(c(mocal_total, sppb_score, facit_v4_summary), ~ . * -1)) %>%     # Reverse scale for these
+  clara(4, samples = 50,  pamLike = TRUE, metric = "euclidean")
+clara_result
+# plot(clara_result)
+
+clara_result$medoids %>% 
+  as_tibble() %>% 
+  mutate(cluster = (1:max(row_number()) %>% factor())) %>% 
+  gather("key", "value", -cluster) %>% 
+  mutate(key = factor(key) %>% 
+           fct_recode(
+             "Anxiety (GAD7)" = "gad7_summary",
+             "Depression (PHQ9)" = "phq9_summary",
+             "PTSD (PCL5)" = "pcl5_summary",
+             "Breathlessness (Dyspnoea-12)" = "dyspnoea12_summary",
+             "Fatigue (FACIT)" = "facit_v4_summary",
+             "Physical Performance (SPPB)" = "sppb_score",
+             "Cognition (MoCA)" = "mocal_total") %>% 
+           fct_relevel(
+             "Anxiety (GAD7)",
+             "Depression (PHQ9)",
+             "PTSD (PCL5)",
+             "Breathlessness (Dyspnoea-12)",
+             "Fatigue (FACIT)",
+             "Physical Performance (SPPB)",
+             "Cognition (MoCA)"
+           )
+  ) %>% 
+  
+  ggplot_lancet(aes(x = fct_rev(key), y = value, colour = cluster, group = cluster)) +
+  geom_line(stat = "identity") +
+  geom_hline(yintercept = 0, linetype = 2) +
+  coord_flip() +
+  scale_colour_brewer("Cluster", palette = "Set1") + 
+  labs(x = "", y = "Z-score (high is more deficit)") +
+  ggtitle("Cluster centres (medoids) for symptom questionnaires",
+          "Normalised scale (z-scores)")
+# PDF 11x7
+```
+
+```{r}
+phosp_cluster = data_in %>% 
+  mutate(cluster = clara_result$clustering %>% 
+           factor(levels = c(1, 2, 3, 4),
+                  labels = c(
+                    "1: Very severe mental/physical impairment",
+                    "2: Severe mental/physical impairment",
+                    "3: Moderate mental/physical impairment + poor cognition",
+                    "4: Mild impairment"),
+           )) %>% 
+  select(study_id, cluster)
+
+```
+
+## Cluster medoids (z-scores)  
+
+```{r}
+clara_result$medoids %>%
+  as_tibble() %>% 
+  mutate(
+    Cluster = 1:4
+  ) %>% 
+  rename(
+    "Anxiety (GAD7)" = "gad7_summary",
+    "Depression (PHQ9)" = "phq9_summary",
+    "PTSD (PCL5)" = "pcl5_summary",
+    "Breathlessness (Dyspnoea-12)" = "dyspnoea12_summary",
+    "Fatigue (FACIT)" = "facit_v4_summary",
+    "Physical Performance (SPPB)" = "sppb_score",
+    "Cognition (MoCA)" = "mocal_total"
+  ) %>% 
+  relocate("Cluster") %>% 
+  mytable()
+```
+
+## Cluster characteristics  
+
+```{r}
+clara_result$clusinfo %>%
+  as_tibble() %>% 
+  mutate(
+    Cluster = 1:4
+  ) %>% 
+  rename(
+    "Size" = "size",
+    "Maximal dissimilarity" = "max_diss",
+    "Average dissimilarity" = "av_diss",
+    "Isolation" = "isolation"
+  ) %>% 
+  relocate("Cluster") %>% 
+  mytable()
+```
+
+
+
+```{r moca, fig.height=7, fig.width=11}
+explanatory_hrqol = c(
+  "gad7_summary",
+  "phq9_summary",
+  "pcl5_summary",
+  "dyspnoea12_summary",
+  "facit_v4_summary",
+  "sppb_score",
+  "mocal_total"
+)  
+
+scales_y = list(
+  scale_y_continuous(),
+  scale_y_reverse(),
+  scale_y_continuous(),
+  scale_y_continuous(),
+  scale_y_continuous(),
+  scale_y_reverse()
+)
+
+scales_x = list(
+  scale_x_reverse(), 
+  scale_x_reverse(), 
+  scale_x_reverse(), 
+  scale_x_reverse(), 
+  scale_x_reverse(), 
+  scale_x_reverse()
+)
+
+# MOCA
+phosp_3m %>% 
+  left_join(phosp_cluster) %>% 
+  select(cluster, explanatory_hrqol) %>% 
+  drop_na() %>% 
+  gather("key", "value", -c(cluster, mocal_total)) %>% 
+  mutate(
+    key = factor(key) %>% 
+      fct_recode(
+        "Anxiety (GAD7)" = "gad7_summary",
+        "Depression (PHQ9)" = "phq9_summary",
+        "PTSD (PCL5)" = "pcl5_summary",
+        "Breathlessness (Dyspnoea-12)" = "dyspnoea12_summary",
+        "Fatigue (FACIT)" = "facit_v4_summary",
+        "Physical Performance (SPPB)" = "sppb_score"
+      )
+  ) %>% 
+  ggplot_lancet(aes(mocal_total, value, colour = cluster)) +
+  geom_jitter(alpha = 0.5) + 
+  xlim(c(10, NA)) +
+  # scale_x_reverse() +
+  scale_colour_brewer(palette = "Set1") + 
+  labs(x = "Cognition (MoCA)", colour = "") +
+  facet_wrap(. ~ key, scale = "free_y") +
+  facetted_pos_scales(y = scales_y, x = scales_x) + 
+  theme(
+    legend.position = c(1, 1.17)
+  ) +
+  guides(colour = guide_legend(title.position = "top",
+                               nrow = 2)) + 
+  ggtitle("",
+          "")
+# PDF 11 x 7
+```
+
+
+```{r gad7, fig.height=7, fig.width=11}
+# GAD7
+scales = list(
+  scale_y_continuous(),
+  scale_y_reverse(),
+  scale_y_reverse(),
+  scale_y_continuous(),
+  scale_y_continuous(),
+  scale_y_reverse()
+)
+
+phosp_3m %>% 
+  left_join(phosp_cluster) %>% 
+  select(cluster, explanatory_hrqol) %>% 
+  drop_na() %>% 
+  gather("key", "value", -c(cluster, gad7_summary)) %>% 
+  mutate(
+    key = factor(key) %>% 
+      fct_recode(
+        #"Anxiety (GAD7)" = "gad7_summary",
+        "Depression (PHQ9)" = "phq9_summary",
+        "PTSD (PCL5)" = "pcl5_summary",
+        "Breathlessness (Dyspnoea-12)" = "dyspnoea12_summary",
+        "Fatigue (FACIT)" = "facit_v4_summary",
+        "Physical Performance (SPPB)" = "sppb_score",
+        "Cognition (MoCA)" = "mocal_total"
+      )
+  ) %>% 
+  ggplot_lancet(aes(gad7_summary, value, colour = cluster)) +
+  geom_jitter(alpha = 0.5) + 
+  scale_colour_brewer(palette = "Set1") + 
+  labs(x = "Anxiety (GAD7)", colour = "") +
+  facet_wrap(. ~ key, scale = "free_y") +
+  facetted_pos_scales(y = scales) + 
+  theme(
+    legend.position = c(1, 1.17)
+  ) +
+  guides(colour = guide_legend(title.position = "top",
+                               nrow = 2)) + 
+  ggtitle("Symptom instruments by GAD7",
+          " ")
+```
+
+
+```{r PHQ9, fig.height=7, fig.width=11}
+# PHQ9
+scales = list(
+  scale_y_continuous(),
+  scale_y_reverse(),
+  scale_y_continuous(),
+  scale_y_reverse(),
+  scale_y_continuous(),
+  scale_y_reverse()
+)
+
+phosp_3m %>% 
+  left_join(phosp_cluster) %>% 
+  select(cluster, explanatory_hrqol) %>% 
+  drop_na() %>% 
+  gather("key", "value", -c(cluster, phq9_summary)) %>% 
+  mutate(
+    key = factor(key) %>% 
+      fct_recode(
+        "Anxiety (GAD7)" = "gad7_summary",
+        # "Depression (PHQ9)" = "phq9_summary",
+        "PTSD (PCL5)" = "pcl5_summary",
+        "Breathlessness (Dyspnoea-12)" = "dyspnoea12_summary",
+        "Fatigue (FACIT)" = "facit_v4_summary",
+        "Physical Performance (SPPB)" = "sppb_score",
+        "Cognition (MoCA)" = "mocal_total"
+      )
+  ) %>% 
+  ggplot_lancet(aes(phq9_summary, value, colour = cluster)) +
+  geom_jitter(alpha = 0.5) + 
+  scale_colour_brewer(palette = "Set1") + 
+  labs(x = "Depression (PHQ9)" , colour = "") +
+  facet_wrap(. ~ key, scale = "free_y") +
+  facetted_pos_scales(y = scales) + 
+  theme(
+    legend.position = c(1, 1.17)
+  ) +
+  guides(colour = guide_legend(title.position = "top",
+                               nrow = 2)) + 
+  ggtitle("Symptom instruments by PHQ9",
+          " ")
+```
+
+
+
+```{r pcl5, fig.height=7, fig.width=11}
+# PCL5
+scales = list(
+  scale_y_continuous(),
+  scale_y_reverse(),
+  scale_y_continuous(),
+  scale_y_reverse(),
+  scale_y_continuous(),
+  scale_y_reverse()
+)
+
+phosp_3m %>% 
+  left_join(phosp_cluster) %>% 
+  select(cluster, explanatory_hrqol) %>% 
+  drop_na() %>% 
+  gather("key", "value", -c(cluster, pcl5_summary)) %>% 
+  mutate(
+    key = factor(key) %>% 
+      fct_recode(
+        "Anxiety (GAD7)" = "gad7_summary",
+        "Depression (PHQ9)" = "phq9_summary",
+        # "PTSD (PCL5)" = "pcl5_summary",
+        "Breathlessness (Dyspnoea-12)" = "dyspnoea12_summary",
+        "Fatigue (FACIT)" = "facit_v4_summary",
+        "Physical Performance (SPPB)" = "sppb_score",
+        "Cognition (MoCA)" = "mocal_total"
+      )
+  ) %>% 
+  ggplot_lancet(aes(pcl5_summary, value, colour = cluster)) +
+  geom_jitter(alpha = 0.5) + 
+  scale_colour_brewer(palette = "Set1") + 
+  labs(x = "PTSD (PCL5)", colour = "") +
+  facet_wrap(. ~ key, scale = "free_y") +
+  facetted_pos_scales(y = scales) + 
+  theme(
+    legend.position = c(1, 1.17)
+  ) +
+  guides(colour = guide_legend(title.position = "top",
+                               nrow = 2)) + 
+  ggtitle("Symptom instruments by PCL5",
+          " ")
+```
+
+```{r dys, fig.height=7, fig.width=11}
+# DYS
+scales = list(
+  scale_y_reverse(),
+  scale_y_continuous(),
+  scale_y_reverse(),
+  scale_y_continuous(),
+  scale_y_continuous(),
+  scale_y_reverse()
+)
+
+
+phosp_3m %>% 
+  left_join(phosp_cluster) %>% 
+  select(cluster, explanatory_hrqol) %>% 
+  drop_na() %>% 
+  gather("key", "value", -c(cluster, dyspnoea12_summary)) %>% 
+  mutate(
+    key = factor(key) %>% 
+      fct_recode(
+        "Anxiety (GAD7)" = "gad7_summary",
+        "Depression (PHQ9)" = "phq9_summary",
+        "PTSD (PCL5)" = "pcl5_summary",
+        # "Breathlessness (Dyspnoea-12)" = "dyspnoea12_summary",
+        "Fatigue (FACIT)" = "facit_v4_summary",
+        "Physical Performance (SPPB)" = "sppb_score",
+        "Cognition (MoCA)" = "mocal_total"
+      )
+  ) %>% 
+  ggplot_lancet(aes(dyspnoea12_summary, value, colour = cluster)) +
+  geom_jitter(alpha = 0.5) + 
+  scale_colour_brewer(palette = "Set1") + 
+  labs(x = "Breathlessness (Dyspnoea-12)", colour = "") +
+  facet_wrap(. ~ key, scale = "free_y") +
+  facetted_pos_scales(y = scales) + 
+  theme(
+    legend.position = c(1, 1.17)
+  ) +
+  guides(colour = guide_legend(title.position = "top",
+                               nrow = 2)) + 
+  ggtitle("Symptom instruments by Dyspnoea-12",
+          " ")
+```
+
+```{r facit, fig.height=7, fig.width=11}
+# FACIT
+scales_y = list(
+  scale_y_continuous(),
+  scale_y_continuous(),
+  scale_y_reverse(),
+  scale_y_continuous(),
+  scale_y_continuous(),
+  scale_y_reverse()
+)
+
+scales_x = list(
+  scale_x_reverse(), 
+  scale_x_reverse(), 
+  scale_x_reverse(), 
+  scale_x_reverse(), 
+  scale_x_reverse(), 
+  scale_x_reverse()
+)
+
+phosp_3m %>% 
+  left_join(phosp_cluster) %>% 
+  select(cluster, explanatory_hrqol) %>% 
+  drop_na() %>% 
+  gather("key", "value", -c(cluster, facit_v4_summary)) %>% 
+  mutate(
+    key = factor(key) %>% 
+      fct_recode(
+        "Anxiety (GAD7)" = "gad7_summary",
+        "Depression (PHQ9)" = "phq9_summary",
+        "PTSD (PCL5)" = "pcl5_summary",
+        "Breathlessness (Dyspnoea-12)" = "dyspnoea12_summary",
+        #"Fatigue (FACIT)" = "facit_v4_summary",
+        "Physical Performance (SPPB)" = "sppb_score",
+        "Cognition (MoCA)" = "mocal_total"
+      )
+  ) %>% 
+  ggplot_lancet(aes(facit_v4_summary, value, colour = cluster)) +
+  geom_jitter(alpha = 0.5) + 
+  scale_colour_brewer(palette = "Set1") + 
+  labs(x = "Fatigue (FACIT)", colour = "") +
+  facet_wrap(. ~ key, scale = "free_y") +
+  facetted_pos_scales(y = scales_y, x = scales_x) + 
+  theme(
+    legend.position = c(1, 1.17)
+  ) +
+  guides(colour = guide_legend(title.position = "top",
+                               nrow = 2)) + 
+  ggtitle("Symptom instruments by FACIT",
+          " ")
+```
+
+```{r sppb, fig.height=7, fig.width=11}
+# SPPB
+scales_y = list(
+  scale_y_continuous(),
+  scale_y_reverse(),
+  scale_y_continuous(),
+  scale_y_reverse(),
+  scale_y_continuous(),
+  scale_y_continuous()
+)
+
+scales_x = list(
+  scale_x_reverse(), 
+  scale_x_reverse(), 
+  scale_x_reverse(), 
+  scale_x_reverse(), 
+  scale_x_reverse(), 
+  scale_x_reverse()
+)
+
+
+phosp_3m %>% 
+  left_join(phosp_cluster) %>% 
+  select(cluster, explanatory_hrqol) %>% 
+  drop_na() %>% 
+  gather("key", "value", -c(cluster, sppb_score)) %>% 
+  mutate(
+    key = factor(key) %>% 
+      fct_recode(
+        "Anxiety (GAD7)" = "gad7_summary",
+        "Depression (PHQ9)" = "phq9_summary",
+        "PTSD (PCL5)" = "pcl5_summary",
+        "Breathlessness (Dyspnoea-12)" = "dyspnoea12_summary",
+        "Fatigue (FACIT)" = "facit_v4_summary",
+        # "Physical Performance (SPPB)" = "sppb_score",
+        "Cognition (MoCA)" = "mocal_total"
+      )
+  ) %>% 
+  ggplot_lancet(aes(sppb_score, value, colour = cluster)) +
+  geom_jitter(alpha = 0.5) + 
+  #scale_x_reverse() +
+  scale_colour_brewer(palette = "Set1") + 
+  labs(x = "Physical Performance (SPPB)", colour = "") +
+  facet_wrap(. ~ key, scale = "free_y") +
+  facetted_pos_scales(x = scales_x, y = scales_y) + 
+  theme(
+    legend.position = c(1, 1.17)
+  ) +
+  guides(colour = guide_legend(title.position = "top",
+                               nrow = 2)) + 
+  ggtitle("Symptom instruments by SPPB",
+          " ")
+```
+
+## Table 1: Clusters by patient characteristics
+
+```{r}
+explanatory = c("swab_pcr_result", 
+                "age_admission", 
+                "crf1a_sex", 
+                "crf1b_eth_5levels", 
+                "imd_quintile",
+                "crf3a_bmi",
+                "crf3a_bmi_2levels",
+                "crf3a_bmi_5levels", 
+                
+                "patient_sq_n",
+                
+                # Comorbidities
+                "no_comorbid",
+                "crf1a_com_card", "crf1a_com_neupsy",
+                "crf1a_com_res", "crf1a_com_rheu",
+                "crf1a_com_gast", "crf1a_com_mer", 
+                "crf1a_com_mh", "crf1a_com_diab",
+                "crf1a_com_id",
+                
+                "crf1a_admission_duration",
+                
+                "crf1a_resp_support_4levels",
+                
+                "crf1a_treat_ss", "crf1a_treat_at", "crf1a_treat_tdac")
+
+dependent = "cluster"
+```
+
+
+### Row proportions
+```{r}
+phosp_hosp %>% 
+  left_join(phosp_cluster) %>% 
+  summary_factorlist(dependent,  explanatory, 
+                     na_include = TRUE, p = TRUE, digits = c(2, 2, 4, 1), 
+                     add_col_totals = TRUE, column = FALSE, cont_nonpara = c(2, 4:20),
+                     total_col = TRUE) %>% 
+  mytable()
+```
+
+### Column proportions
+```{r}
+phosp_hosp %>% 
+  left_join(phosp_cluster) %>% 
+  summary_factorlist(dependent,  explanatory, 
+                     na_include = TRUE, p = TRUE, digits = c(2, 2, 4, 1), 
+                     cont_nonpara = c(2, 4:20),
+                     add_col_totals = TRUE, column = TRUE,
+                     total_col = TRUE) %>% 
+  mytable()
+```
+
+
+
+## Table 2: Clusters by HRQoL
+
+```{r}
+explanatory_differences = c("psq_recovered",
+                            "eq5d5l_summary_pre",
+                            "eq5d5l_summary",
+                            # Pull delta_change names
+                            phosp %>% 
+                              select(matches("eq5d5l_q.*_delta_change")
+                              ) %>% 
+                              names(),
+                            "eq5d5l_utility_index_pre",
+                            "eq5d5l_utility_index",
+                            "eq5d5l_utility_index_delta",
+                            
+                            "patient_sq_l_t_disability",
+                            "patient_sq_l_t__new_disability")
+```
+
+### Row proportions
+```{r}
+phosp_3m %>% 
+  left_join(phosp_cluster) %>% 
+  summary_factorlist(dependent,  explanatory_differences,
+                     na_include = TRUE, column = FALSE,
+                     add_col_totals = TRUE, digits = c(2, 2, 4, 1),
+                     total_col = TRUE, p = TRUE) %>% 
+  mytable()
+
+```
+
+### Column proportions
+
+```{r}
+phosp_3m %>% 
+  left_join(phosp_cluster) %>% 
+  summary_factorlist(dependent,  explanatory_differences,
+                     na_include = TRUE, column = TRUE,
+                     add_col_totals = TRUE, digits = c(2, 2, 4, 1),
+                     total_col = TRUE, p = TRUE) %>% 
+  mytable()
+
+```
+
+## Table 3
+
+```{r}
+phosp_wt_table = phosp_wt %>% 
+  filter(wt_type == "Incremental shuttle walk test (ISWT) Modified 15 level") %>% 
+  filter(wt_visit == "3 months") %>% 
+  drop_na(wt_distance) %>% 
+  mutate(wt_iswt_predicted_perc = replace_na(wt_iswt_predicted_perc, 0)) %>% # to deal with max returning inf
+  group_by(study_id) %>%  # More than one test per patient
+  mutate(value_max = if_else(row_number() == which.max(wt_iswt_predicted_perc), TRUE, FALSE)) %>% 
+  filter(value_max) %>% 
+  select(study_id, wt_distance, wt_iswt_predicted_perc) %>% 
+  as.data.frame() %>% 
+  ff_relabel_df(phosp_wt)
+
+phosp_pft_table = phosp %>% 
+  filter(redcap_event_name== "3 Months (1st Research Visit)") %>% 
+  filter(redcap_repeat_instrument == "Pulmonary Functional Tests") %>% 
+  filter(pft_spm_done == "Yes") %>% 
+  select(study_id, starts_with("pft_")) %>% 
+  drop_na(pft_fev1) %>% 
+  group_by(study_id) %>% 
+  mutate(value_max = if_else(row_number() == which.max(pft_fev1), TRUE, FALSE)) %>% 
+  filter(value_max) %>% 
+  select("pft_fev1_perc_pred",
+         "pft_fev1",
+         "pft_fev1_perc_pred_80",
+         "pft_fvc_perc_pred",
+         "pft_fvc",
+         "pft_fvc_perc_pred_80",
+         "pft_fev1_fvc_70") %>% 
+  as.data.frame() %>% 
+  ff_relabel_df(phosp)
+
+# Do kco and tlco extraction and percentage normal separately. 
+phosp_kco_table = phosp %>% 
+  filter(redcap_event_name== "3 Months (1st Research Visit)") %>% 
+  filter(redcap_repeat_instrument == "Pulmonary Functional Tests") %>% 
+  filter(pft_spm_done == "Yes") %>% 
+  select(study_id, pft_tlco, pft_kco) %>% 
+  drop_na(pft_kco) %>% 
+  left_join(phosp_kco %>% select(study_id, tlcoM_SI_pred, kcoM_SI_pred)) %>% 
+  mutate(
+    pft_tlco_pred = (100 * pft_tlco / tlcoM_SI_pred) %>% ff_label("TLCO % predicted"),
+    pft_kco_pred = (100 * pft_kco / kcoM_SI_pred) %>% ff_label("KCO % predicted"),
+    
+    pft_tlco_pred_80 = case_when(
+      pft_tlco_pred < 80 ~ "Yes",
+      pft_tlco_pred >= 80 ~ "No",
+    ) %>% 
+      ff_label("TLCO predicted <80%"),
+    
+    pft_kco_pred_80 = case_when(
+      pft_kco_pred < 80 ~ "Yes",
+      pft_kco_pred >= 80 ~ "No",
+    ) %>% 
+      ff_label("KCO predicted <80%"),
+    
+  ) %>% 
+  ff_relabel_df(phosp)
+
+phosp_pft_table = phosp_pft_table %>% 
+  left_join(phosp_kco_table)
+```
+
+
+```{r}
+phosp_bloods_table = phosp %>% 
+  filter(redcap_event_name== "3 Months (1st Research Visit)") %>% 
+  filter(redcap_repeat_instrument == "Laboratory Results Collection Log - Routine blood tests") %>% 
+  group_by(study_id) %>% 
+  summarise(
+    # This needs to summarise over multiple blood tests per visit. 
+    # Take max values and yes over no. 
+    # Convoluted by necessity. 
+    # note case_when doesn't currently work with any. Known issue Feb 21
+    bnp_result = ifelse(all(is.na(bnp_result)), NA, max(bnp_result, na.rm = TRUE)),
+    pnbnp_result = ifelse(all(is.na(pnbnp_result)), NA, max(pnbnp_result, na.rm = TRUE)),
+    bnp_summary = ifelse(any(bnp_summary == "Yes", na.rm = TRUE), "Yes", 
+                         ifelse(any(bnp_summary == "No", na.rm = TRUE), "No", 
+                                NA)),
+    
+    hba1c_result = ifelse(all(is.na(hba1c_result)), NA, max(hba1c_result, na.rm = TRUE)),
+    hba1c_summary = ifelse(any(hba1c_summary == "Yes", na.rm = TRUE), "Yes", 
+                           ifelse(any(hba1c_summary == "No", na.rm = TRUE), "No", 
+                                  NA)),
+    
+    egfr_result = ifelse(all(is.na(egfr_result)), NA, max(egfr_result, na.rm = TRUE)),
+    egfr_summary = ifelse(any(egfr_summary == "Yes", na.rm = TRUE), "Yes", 
+                          ifelse(any(egfr_summary == "No", na.rm = TRUE), "No", 
+                                 NA)),
+    
+    ddi_result = ifelse(all(is.na(ddi_result)), NA, max(ddi_result, na.rm = TRUE)),
+    ddi_summary = ifelse(any(ddi_summary == "Yes", na.rm = TRUE), "Yes", 
+                         ifelse(any(ddi_summary == "No", na.rm = TRUE), "No", 
+                                NA)),
+    
+    crp_result = ifelse(all(is.na(crp_result )), NA, max(crp_result , na.rm = TRUE)),
+    crp_summary = ifelse(any(crp_summary  == "Yes", na.rm = TRUE), "Yes", 
+                         ifelse(any(crp_summary == "No", na.rm = TRUE), "No", 
+                                NA)),
+  ) %>% 
+  ff_relabel_df(phosp)
+
+phosp_bloods_table = phosp_bloods_table %>% 
+  mutate(
+    crp_summary5 = case_when(
+      crp_result > 5 ~ "Yes",
+      crp_result <= 5 ~ "No"
+    ) %>% 
+      ff_label("CRP (>5 mg/L)")
+  )
+
+
+explanatory_hrqol = c(
+  # "symptom_any",
+  # "symptom_count",
+  "gad7_summary_2levels",
+  "gad7_summary",
+  "phq9_summary_2levels",
+  "phq9_summary",
+  "pcl5_summary_2levels",
+  "pcl5_summary",
+  "dyspnoea12_summary",
+  "facit_v4_summary",
+  "bpi_severity_summary",
+  "bpi_interference_summary",
+  "sppb_score",
+  "sppb_score_summary",
+  "wt_distance",
+  "wt_iswt_predicted_perc",
+  "rcf_score_summary",
+  "rcf_score",
+  "mocal_total_summary",
+  "mocal_total",
+  "mocal_total_corrected",  
+  "mocal_total_corrected_summary", 
+  "pft_fev1_perc_pred", 
+  "pft_fev1_perc_pred_80",
+  "pft_fvc_perc_pred_80",
+  "pft_fev1_fvc_70",
+  "pft_tlco",
+  "pft_tlco_pred",
+  "pft_tlco_pred_80",
+  "pft_kco",           
+  "pft_kco_pred",
+  "pft_kco_pred_80",
+  "bnp_summary",
+  "hba1c_summary",
+  "egfr_summary",
+  "ddi_result",
+  "ddi_summary",
+  "crp_summary5",
+  "crp_summary"
+)
+```
+
+
+### Row proportions
+
+```{r}
+phosp_3m %>%
+  left_join(phosp_wt_table) %>% 
+  left_join(phosp_pft_table) %>% 
+  left_join(phosp_bloods_table) %>% 
+  left_join(phosp_hosp %>% select(study_id, crf1a_resp_support_4levels)) %>% 
+  left_join(phosp_cluster) %>% 
+  select(dependent, explanatory_hrqol) %T>% 
+  {data_in <<- .} %>% 
+  summary_factorlist(dependent,  explanatory_hrqol,
+                     na_include = TRUE, 
+                     total_col = TRUE, column = FALSE,  cont_nonpara = c(2),
+                     add_col_totals = TRUE, add_row_totals = TRUE, include_row_missing_col = FALSE,
+                     p = TRUE, digits = c(2, 2, 4, 1)) %>%
+  mytable()
+```
+
+
+
+
+### Column proportions
+
+```{r}
+phosp_3m %>%
+  left_join(phosp_wt_table) %>% 
+  left_join(phosp_pft_table) %>% 
+  left_join(phosp_bloods_table) %>% 
+  left_join(phosp_hosp %>% select(study_id, crf1a_resp_support_4levels)) %>% 
+  left_join(phosp_cluster) %>% 
+  select(dependent, explanatory_hrqol) %T>% 
+  {data_in <<- .} %>% 
+  summary_factorlist(dependent,  explanatory_hrqol,
+                     na_include = TRUE, 
+                     total_col = TRUE, column = TRUE, cont_nonpara = c(2),
+                     add_col_totals = TRUE, add_row_totals = TRUE, include_row_missing_col = FALSE,
+                     na_include_dependent = TRUE,
+                     p = TRUE, digits = c(2, 2, 4, 1)) %>%
+  mytable()
+```
+
+## Table 4
+
+### Row proportions
+```{r}
+explanatory_occupation = c(
+  # "crf1b_healthcare_worker", "crf1b_caring",
+  "social_status_before", #  "social_status_after", 
+  "working_status_change", "working_less", 
+  "no_longer_working", "health_reasons",
+  "employer_reasons", "other_reasons"
+  
+  # "patient_sq_q", "patient_sq_q_today", "patient_sq_q_change",
+  # "patient_sq_p_smoking", "patient_sq_p_drinking",
+  # "patient_sq_p_eating", "patient_sq_p_activity"
+)
+
+phosp_3m %>%
+  left_join(phosp_hosp %>% select(study_id, crf1a_resp_support_4levels, crf1b_healthcare_worker, crf1b_caring)) %>% 
+  left_join(phosp_cluster) %>% 
+  summary_factorlist(dependent,  explanatory_occupation,
+                     na_include = TRUE, 
+                     total_col = TRUE, column = FALSE, 
+                     add_col_totals = TRUE, add_row_totals = TRUE, include_row_missing_col = FALSE,
+                     p = TRUE, digits = c(2, 2, 4, 1)) %>% 
+  mytable()
+```
+
+### Column proportions
+
+```{r}
+phosp_3m %>%
+  left_join(phosp_hosp %>% select(study_id, crf1a_resp_support_4levels, crf1b_healthcare_worker, crf1b_caring)) %>% 
+  left_join(phosp_cluster) %>% 
+  summary_factorlist(dependent,  explanatory_occupation,
+                     na_include = TRUE, 
+                     total_col = TRUE, column = TRUE, 
+                     add_col_totals = TRUE, add_row_totals = TRUE, include_row_missing_col = FALSE,
+                     p = TRUE, digits = c(2, 2, 4, 1)) %>% 
+  mytable()
+```
+
+## CRP vs BMI figure
+
+```{r}
+cor_result = phosp_3m %>% 
+  left_join(phosp_bloods_table) %>% 
+  left_join(phosp_cluster) %>% 
+  select(crp_result, crf3a_bmi, cluster) %>% 
+  drop_na() %>% 
+  filter(crf3a_bmi < 70) %>% 
+  filter(crp_result > 0 ) %$%
+  cor.test(log(crp_result), crf3a_bmi) %>% 
+  tidy()
+
+cor_label = paste0("Pearson correlation coefficient\n", cor_result$estimate %>% round_tidy(3), " (p ", cor_result$p.value %>% p_tidy(3), ")")
+```
+
+```{r fig.height=7, fig.width=11}
+p1 = phosp_3m %>% 
+  left_join(phosp_bloods_table) %>% 
+  left_join(phosp_cluster) %>% 
+  select(crp_result, crf3a_bmi, cluster) %>% 
+  filter(crf3a_bmi < 70) %>% 
+  drop_na() %T>% 
+  {total_n <<- dim(.)[[1]]} %>% 
+  ggplot_lancet(aes(crf3a_bmi, crp_result, colour = cluster)) +
+  geom_jitter(alpha = 0.5) + 
+  geom_smooth(method = "lm", se = FALSE) +
+  scale_colour_brewer("",palette = "Set1") +
+  scale_y_log10() + 
+  labs(x = "BMI", y = "CRP (mg/L, log scale)") +
+  annotate("text", x = 60, y = 1, label = cor_label, hjust = 1) +
+  guides(colour = guide_legend(ncol = 2)) +
+  ggtitle("CRP by BMI",
+          "Fitted line: linear regression")
+p1
+```
+
+```{r}
+phosp_3m %>% 
+  left_join(phosp_bloods_table) %>% 
+  left_join(phosp_cluster) %>% 
+  select(crp_result, crf3a_bmi, cluster) %>% 
+  filter(crf3a_bmi < 70) %$%
+  cor.test(log(crp_result), crf3a_bmi)
+```
+
+```{r}
+phosp_3m %>% 
+  left_join(phosp_bloods_table) %>% 
+  left_join(phosp_cluster) %>% 
+  select(crp_result, crf3a_bmi, cluster) %>% 
+  filter(crf3a_bmi < 70) %>% 
+  filter(crp_result > 0 ) %>% 
+  lmmulti("log(crp_result)", c("crf3a_bmi")) %>% 
+  summary()
+```
+
+
+```{r}
+phosp_3m %>% 
+  left_join(phosp_bloods_table) %>% 
+  left_join(phosp_cluster) %>% 
+  select(crp_result, crf3a_bmi, cluster) %>% 
+  filter(crf3a_bmi < 70) %>% 
+  filter(crp_result > 0 ) %>% 
+  lmmulti("log(crp_result)", c("crf3a_bmi", "cluster")) %>% 
+  summary()
+```
+
+
 
 
 
