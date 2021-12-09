@@ -678,6 +678,18 @@ fit = phosp_hosp_12m %>%
 ### Number of patients in clustering
 
 ```{r}
+## There were two different ways of defining 3m so the results have diverged. 
+phosp_3m_cluster = phosp %>%
+  filter(redcap_event_name== "3 Months (1st Research Visit)") %>%
+  filter(is.na(redcap_repeat_instance)) %>%
+  # filter(!is.na(crf3b_date_visit)) %>%
+  # filter(!is.na(crf1a_date_dis)) %>%
+  # filter(discharge_to_review >= 42 & discharge_to_review < 240) %>% 
+  purrr::discard(~all(is.na(.)))
+```
+
+
+```{r}
 explanatory_hrqol = c(
   "gad7_summary",
   "phq9_summary",
@@ -688,12 +700,12 @@ explanatory_hrqol = c(
   "mocal_total"
 )
 
-phosp_3m %>% 
+phosp_3m_cluster %>% 
   select(explanatory_hrqol) %>%
   missing_glimpse() %>% 
   mytable()
 
-phosp_3m %>% 
+phosp_3m_cluster %>% 
   select(explanatory_hrqol) %>%
   drop_na() %>% 
   count(name = "Complete cases") 
@@ -704,7 +716,7 @@ phosp_3m %>%
 # Normalise
 library(recipes)
 set.seed(1234)
-clara_result = phosp_3m %>% 
+clara_result = phosp_3m_cluster %>% 
   select(study_id, explanatory_hrqol) %>% 
   drop_na() %T>% 
   {data_in <<- .} %>% 
@@ -764,7 +776,6 @@ phosp_cluster = data_in %>%
                     "4: Mild impairment"),
            )) %>% 
   select(study_id, cluster)
-
 ```
 
 ## Cluster medoids (z-scores)  
