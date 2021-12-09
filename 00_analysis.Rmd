@@ -3,6 +3,8 @@ title: "PHOSP-Covid Second Report"
 author: "PHOSP-COVID collaborative"
 date: "20/10/2021"
 output: word_document
+editor_options: 
+  chunk_output_type: console
 ---
 
 ```{r setup, include=FALSE}
@@ -48,11 +50,14 @@ phosp = phosp %>%
 rm(phosp_ids_to_exclude)
 ```
 
-## Remove out of date range patients
 ```{r}
 phosp = phosp %>% 
   mutate(discharge_to_review = (crf3b_date_visit - crf1a_date_dis) %>% as.numeric())
 
+```
+
+```{r eval=FALSE, include=FALSE}
+# DON@T RUN THIS - MOVE TO WHERE phosp_3m and phosp_12m are defined below. 
 drop_out_of_range_study_id = phosp %>% 
   filter(
     (redcap_event_name== "3 Months (1st Research Visit)" &
@@ -65,7 +70,21 @@ drop_out_of_range_study_id = phosp %>%
   pull(study_id)
 # n = 54
 
+phosp = phosp %>%
+  filter(!study_id %in% drop_out_of_range_study_id)
+
 rm(drop_out_of_range_study_id )
+```
+
+## Fix labels
+```{r}
+phosp = phosp %>% 
+  mutate(crf1a_sex = ff_label(crf1a_sex, "Sex"),
+    crf1a_treat_ss = ff_label(crf1a_treat_ss, "Systemic (oral or IV) steroids"),
+    crf1a_treat_at = ff_label(crf1a_treat_at, "Antibiotic therapy"),
+    crf1a_treat_tdac = ff_label(crf1a_treat_tdac , "Therapeutic dose anticoagulation"),
+    discharge_to_review = ff_label(discharge_to_review, "Hospital discharge to visit (days)")
+  )
 ```
 
 
@@ -177,13 +196,55 @@ phosp_hosp = phosp %>%
 phosp_3m = phosp %>%
   filter(redcap_event_name== "3 Months (1st Research Visit)") %>%
   filter(is.na(redcap_repeat_instance)) %>%
+  filter(!is.na(crf3b_date_visit)) %>% 
+  filter(!is.na(crf1a_date_dis)) %>%
+  filter(discharge_to_review >= 42 & discharge_to_review < 240) %>% 
   purrr::discard(~all(is.na(.)))
+```
+
+### "12 month" subgroup
+
+```{r}
+phosp_12m = phosp %>%
+  filter(redcap_event_name== "12 Months (2nd Research Visit)") %>%
+  filter(is.na(redcap_repeat_instance)) %>%
+  filter(!is.na(crf3b_date_visit)) %>% 
+  filter(!is.na(crf1a_date_dis)) %>% 
+  filter(discharge_to_review >= 300) %>% 
+  purrr::discard(~all(is.na(.)))
+```
+
+### Define paired data
+As per Olivia code
+
+```{r}
+paired_IDs  = phosp %>%
+  filter(is.na(redcap_repeat_instance)) %>%
+  filter(!is.na(discharge_to_review)) %>% 
+  filter(redcap_event_name %in% c("3 Months (1st Research Visit)", "12 Months (2nd Research Visit)"))   %>%
+           select(study_id, redcap_event_name) %>%
+           count(study_id) %>%
+           filter(n == 2) %>%
+           filter(study_id %in% phosp_3m$study_id) %>%
+           filter(study_id %in% phosp_12m$study_id) %>%
+           pull(study_id)
+```
+
+
+### Make psq_recovered and discharge to review in phosp_hosp 3 month data
+```{r}
+phosp_hosp_3m = phosp_hosp %>% 
+  left_join(phosp_3m %>% select(study_id, psq_recovered, discharge_to_review)) %>% 
+    mutate(
+    psq_recovered = fct_recode(psq_recovered, "No" = "Not sure") %>% 
+      fct_relevel("No")
+    )
 ```
 
 ### Make psq_recovered and discharge to review in phosp_hosp 3 month data
 ```{r}
-phosp_hosp = phosp_hosp %>% 
-  left_join(phosp_3m %>% select(study_id, psq_recovered, discharge_to_review)) %>% 
+phosp_hosp_12m = phosp_hosp %>% 
+  left_join(phosp_12m %>% select(study_id, psq_recovered, discharge_to_review)) %>% 
     mutate(
     psq_recovered = fct_recode(psq_recovered, "No" = "Not sure") %>% 
       fct_relevel("No")
@@ -222,6 +283,8 @@ source("https://raw.githubusercontent.com/SurgicalInformatics/phosp_clean/main/0
 ```
 
 ## Impute missing data including psq_recovered
+
+### 3 month 
 
 ```{r}
 ## Multiple imputation
@@ -263,48 +326,117 @@ explanatory = c("age_admission",
 # for explanatory variable of interest and
 # outcome variable. 
 # But include in algorithm for imputation.
-predM = phosp_hosp %>% 
+predM = phosp_hosp_3m %>% 
   select(explanatory) %>% 
   missing_predictorMatrix(
     drop_from_imputed = c("study_id", "redcap_data_access_group"), 
     drop_from_imputer = c("study_id", "redcap_data_access_group", "discharge_to_review"))
 
 # This is needed to drop from imputed!
-m0 = mice(phosp_hosp %>% 
+m0 = mice(phosp_hosp_3m %>% 
   select(explanatory), maxit=0)
 m0$method[c("study_id")] = ""
 m0$method[c("redcap_data_access_group")] = ""
 
-phosp_hosp_imputed = phosp_hosp %>% 
+phosp_hosp_3m_imputed = phosp_hosp_3m %>% 
   select(explanatory) %>% 
   mice(m = 10, maxit = 10, predictorMatrix = predM, method = m0$method)
 
-plot(phosp_hosp_imputed)
-summary(phosp_hosp_imputed)
-path = paste0("/home/common/phosp/share/phosp_hosp_imputed_", timestamp, ".rds") 
-saveRDS(phosp_hosp_imputed, file = path)
+plot(phosp_hosp_3m_imputed)
+summary(phosp_hosp_3m_imputed)
+path = paste0("/home/common/phosp/share/phosp_hosp_3m_imputed_", timestamp, ".rds") 
+saveRDS(phosp_hosp_3m_imputed, file = path)
 system(paste("chown :covid", path))
 ```
 
 ```{r}
 # Load mice sets
-path = paste0("/home/common/phosp/share/phosp_hosp_imputed_", timestamp, ".rds") 
-phosp_hosp_imputed = readRDS(path)
+path = paste0("/home/common/phosp/share/phosp_hosp_3m_imputed_", timestamp, ".rds") 
+phosp_hosp_3m_imputed = readRDS(path)
 ```
+
+### 12 month
+
+```{r eval=FALSE, include=FALSE}
+# Run mice
+set.seed(1)
+explanatory = c("age_admission", 
+                "crf1a_sex", 
+                "crf1b_eth_5levels", 
+                "imd_quintile",
+                "crf3a_bmi",
+                
+                "crf1a_resp_support_4levels",
+                
+                # Comorbidities - # None of these are imputed as missing considered absent
+                "no_comorbid",
+                "no_comorbid_3levels",
+                "crf1a_com_card", "crf1a_com_neupsy",
+                "crf1a_com_res", "crf1a_com_rheu",
+                "crf1a_com_gast", "crf1a_com_mer", 
+                "crf1a_com_mh", "crf1a_com_diab",
+                "crf1a_com_id",
+                
+                "crf1a_admission_duration",
+                
+                "crf1a_treat_ss", "crf1a_treat_at", "crf1a_treat_tdac",
+                "psq_recovered",
+                
+                "study_id",
+                "redcap_data_access_group",
+                
+                "discharge_to_review")
+
+
+# Choose not to impute missing values
+# for explanatory variable of interest and
+# outcome variable. 
+# But include in algorithm for imputation.
+predM = phosp_hosp_12m %>% 
+  select(explanatory) %>% 
+  missing_predictorMatrix(
+    drop_from_imputed = c("study_id", "redcap_data_access_group"), 
+    drop_from_imputer = c("study_id", "redcap_data_access_group", "discharge_to_review"))
+
+# This is needed to drop from imputed!
+m0 = mice(phosp_hosp_12m %>% 
+  select(explanatory), maxit=0)
+m0$method[c("study_id")] = ""
+m0$method[c("redcap_data_access_group")] = ""
+
+phosp_hosp_12m_imputed = phosp_hosp_12m %>% 
+  select(explanatory) %>% 
+  mice(m = 10, maxit = 10, predictorMatrix = predM, method = m0$method)
+
+plot(phosp_hosp_12m_imputed)
+summary(phosp_hosp_12m_imputed)
+path = paste0("/home/common/phosp/share/phosp_hosp_12m_imputed_", timestamp, ".rds") 
+saveRDS(phosp_hosp_12m_imputed, file = path)
+system(paste("chown :covid", path))
+```
+
 
 ## Paper 1 regression 
 
-## Multivariable logistic regression (with BMI 2 levels AND discharge_to_review)
+### 3 month multivariable logistic regression (with BMI 2 levels AND discharge_to_review)
+
+
+```{r}
+# Load mice sets
+path = paste0("/home/common/phosp/share/phosp_hosp_3m_imputed_", timestamp, ".rds") 
+phosp_hosp_3m_imputed = readRDS(path)
+```
+
 
 ```{r}
 dependent = "psq_recovered"
 explanatory = c("age_admission_factor", "crf1a_sex", "crf1b_eth_5levels", "imd_quintile", "no_comorbid_3levels", "crf3a_bmi_2levels", "crf1a_resp_support_4levels", "crf1a_treat_ss", "crf1a_treat_at", "crf1a_treat_tdac", "discharge_to_review")
 explanatory_multi = c("age_admission", "crf1a_sex", "crf1b_eth_5levels", "imd_quintile", "no_comorbid_3levels")
 
-fit_cc = phosp_hosp %>% 
+fit_cc = phosp_hosp_3m %>% 
   finalfit(dependent, explanatory, keep_fit_id = TRUE)
 
-fit_multi_imputed_pool = phosp_hosp_imputed %>% 
+fit_multi_imputed_pool = phosp_hosp_3m_imputed %>% 
   mice::complete("all") %>%
   # Probably temp. Add age_admission_factor to imputed datasets
   purrr::map(~ mutate(., 
@@ -337,7 +469,136 @@ fit_multi_imputed_pool = phosp_hosp_imputed %>%
 
 # Multilevel
 library(broom.mixed)
-fit_mixed_imputed_pool = phosp_hosp_imputed %>% 
+fit_mixed_imputed_pool = phosp_hosp_3m_imputed %>% 
+  mice::complete("all") %>%
+  # Probably temp. Add age_admission_factor to imputed datasets
+  purrr::map(~ mutate(., 
+               age_admission_factor = case_when(
+                 age_admission < 30 ~ "<30",
+                 age_admission < 40 ~ "30-39",
+                 age_admission < 50 ~ "40-49",
+                 age_admission < 60 ~ "50-59",
+                 age_admission < 70 ~ "60-69",
+                 age_admission < 80 ~ "70-79",
+                 is.na(age_admission) ~ NA_character_,
+                 TRUE ~ "80+"
+               ) %>% 
+                 fct_relevel("50-59"),
+               
+               crf3a_bmi_2levels = case_when(
+                 crf3a_bmi < 30 ~ "BMI < 30 kg/m^2",
+                 is.na(crf3a_bmi) ~ NA_character_,
+                 TRUE ~ "BMI 30+ kg/m^2"
+               ) %>% 
+                 factor() %>% 
+                 fct_relevel("BMI < 30 kg/m^2", "BMI 30+ kg/m^2") %>% 
+                 ff_label("BMI (2 levels)"))
+  ) %>% 
+  purrr::map(~ glmmixed(.x, dependent, explanatory, random_effect = "redcap_data_access_group")) %>%
+  as.mira() %>% 
+  pool()
+
+fit_multi_imputed = fit_multi_imputed_pool%>% 
+  fit2df(estimate_name = "OR (multivariable imputation)", exp = TRUE)
+
+fit_mixed_imputed = fit_mixed_imputed_pool%>% 
+  fit2df(estimate_name = "OR (multilevel imputation)", exp = TRUE)
+  
+fit_cc %>% 
+  # ff_merge(fit_uni_imputed) %>% 
+  ff_merge(fit_multi_imputed) %>% 
+  ff_merge(fit_mixed_imputed, last_merge = TRUE) %>% 
+  # dplyr::relocate(1, 2, 3, 4, 5, 7, 6, 8) %>% 
+  mytable()
+```
+
+
+## Figure: Multilevel logistic regression (multiple imputation)
+
+```{r fig.height=7, fig.width=12}
+dependent = "psq_recovered"
+explanatory = c("age_admission_factor", "crf1a_sex", "crf1b_eth_5levels", "imd_quintile", "no_comorbid_3levels", "crf3a_bmi_2levels", "crf1a_resp_support_4levels", "crf1a_treat_ss", "crf1a_treat_at", "crf1a_treat_tdac", "discharge_to_review")             
+                                                               
+fit = phosp_hosp_3m %>%
+  or_plot(dependent, explanatory, column_space = c(-0.5, 0.15, 0.5), table_text_size = 3.5, 
+          glmfit = fit_mixed_imputed_pool,
+          dependent_label = "", suffix = "", 
+          breaks = c(0.2, 0.5, 1, 2, 5, 10, 30), )
+ # PDF 10 x 9
+```
+
+
+## Alternative figure with fewer variables (model the same)
+
+```{r fig.height=7, fig.width=12}
+dependent = "psq_recovered"
+explanatory = c("age_admission_factor", "crf1a_sex", "crf1b_eth_5levels", "imd_quintile", "no_comorbid_3levels", "crf3a_bmi_2levels", "crf1a_resp_support_4levels", "crf1a_treat_ss", "discharge_to_review")
+
+fig1c = phosp_hosp_3m %>%
+  or_plot(dependent, explanatory, column_space = c(-0.5, 0.15, 0.5), table_text_size = 3.5, 
+          glmfit = fit_mixed_imputed_pool, remove_ref = TRUE,
+          dependent_label = "", suffix = "",
+          breaks = c(0.2, 0.5, 1, 2, 5, 10, 30), )
+# PDF 10 x 9
+```
+
+
+
+
+## Paper 1 regression 
+
+### 12 month multivariable logistic regression (with BMI 2 levels AND discharge_to_review)
+
+
+```{r}
+# Load mice sets
+path = paste0("/home/common/phosp/share/phosp_hosp_12m_imputed_", timestamp, ".rds") 
+phosp_hosp_12m_imputed = readRDS(path)
+```
+
+
+```{r}
+dependent = "psq_recovered"
+explanatory = c("age_admission_factor", "crf1a_sex", "crf1b_eth_5levels", "imd_quintile", "no_comorbid_3levels", "crf3a_bmi_2levels", "crf1a_resp_support_4levels", "crf1a_treat_ss", "crf1a_treat_at", "crf1a_treat_tdac", "discharge_to_review")
+explanatory_multi = c("age_admission", "crf1a_sex", "crf1b_eth_5levels", "imd_quintile", "no_comorbid_3levels")
+
+fit_cc = phosp_hosp_12m %>% 
+  finalfit(dependent, explanatory, keep_fit_id = TRUE)
+
+fit_multi_imputed_pool = phosp_hosp_12m_imputed %>% 
+  mice::complete("all") %>%
+  # Probably temp. Add age_admission_factor to imputed datasets
+  purrr::map(~ mutate(., 
+                      age_admission_factor = case_when(
+                        age_admission < 30 ~ "<30",
+                        age_admission < 40 ~ "30-39",
+                        age_admission < 50 ~ "40-49",
+                        age_admission < 60 ~ "50-59",
+                        age_admission < 70 ~ "60-69",
+                        age_admission < 80 ~ "70-79",
+                        is.na(age_admission) ~ NA_character_,
+                        TRUE ~ "80+"
+                      ) %>% 
+                        fct_relevel("50-59"),
+                      
+                      crf3a_bmi_2levels = case_when(
+                        crf3a_bmi < 30 ~ "BMI < 30 kg/m^2",
+                        is.na(crf3a_bmi) ~ NA_character_,
+                        TRUE ~ "BMI 30+ kg/m^2"
+                      ) %>% 
+                        factor() %>% 
+                        fct_relevel("BMI < 30 kg/m^2", "BMI 30+ kg/m^2") %>% 
+                        ff_label("BMI (2 levels)")
+  )
+  ) %>% 
+  purrr::map(~ glmmulti(.x, dependent, explanatory)) %>%
+  as.mira() %>% 
+  pool()
+
+
+# Multilevel
+library(broom.mixed)
+fit_mixed_imputed_pool = phosp_hosp_12m_imputed %>% 
   mice::complete("all") %>%
   # Probably temp. Add age_admission_factor to imputed datasets
   purrr::map(~ mutate(., 
@@ -387,7 +648,7 @@ fit_cc %>%
 dependent = "psq_recovered"
 explanatory = c("age_admission_factor", "crf1a_sex", "crf1b_eth_5levels", "imd_quintile", "no_comorbid_3levels", "crf3a_bmi_2levels", "crf1a_resp_support_4levels", "crf1a_treat_ss", "crf1a_treat_at", "crf1a_treat_tdac", "discharge_to_review")
 
-fit = phosp_hosp %>%
+fit = phosp_hosp_12m %>%
   or_plot(dependent, explanatory, column_space = c(-0.5, 0.15, 0.5), table_text_size = 4, 
           glmfit = fit_mixed_imputed_pool,
           dependent_label = "", suffix = "",
@@ -402,14 +663,13 @@ fit = phosp_hosp %>%
 dependent = "psq_recovered"
 explanatory = c("age_admission_factor", "crf1a_sex", "crf1b_eth_5levels", "imd_quintile", "no_comorbid_3levels", "crf3a_bmi_2levels", "crf1a_resp_support_4levels", "crf1a_treat_ss", "discharge_to_review")
 
-fit = phosp_hosp %>%
+fit = phosp_hosp_12m %>%
   or_plot(dependent, explanatory, column_space = c(-0.5, 0.15, 0.5), table_text_size = 4, 
           glmfit = fit_mixed_imputed_pool,
           dependent_label = "", suffix = "",
           breaks = c(0.2, 0.5, 1, 2, 5, 10, 30), )
 # PDF 10 x 9
 ```
-
 
 
 
@@ -929,7 +1189,7 @@ dependent = "cluster"
 
 ### Row proportions
 ```{r}
-phosp_hosp %>% 
+phosp_hosp_3m %>% 
   left_join(phosp_cluster) %>% 
   summary_factorlist(dependent,  explanatory, 
                      na_include = TRUE, p = TRUE, digits = c(2, 2, 4, 1), 
@@ -940,7 +1200,7 @@ phosp_hosp %>%
 
 ### Column proportions
 ```{r}
-phosp_hosp %>% 
+phosp_hosp_3m %>% 
   left_join(phosp_cluster) %>% 
   summary_factorlist(dependent,  explanatory, 
                      na_include = TRUE, p = TRUE, digits = c(2, 2, 4, 1), 
@@ -1161,7 +1421,7 @@ phosp_3m %>%
   left_join(phosp_wt_table) %>% 
   left_join(phosp_pft_table) %>% 
   left_join(phosp_bloods_table) %>% 
-  left_join(phosp_hosp %>% select(study_id, crf1a_resp_support_4levels)) %>% 
+  left_join(phosp_hosp_3m %>% select(study_id, crf1a_resp_support_4levels)) %>% 
   left_join(phosp_cluster) %>% 
   select(dependent, explanatory_hrqol) %T>% 
   {data_in <<- .} %>% 
@@ -1183,7 +1443,7 @@ phosp_3m %>%
   left_join(phosp_wt_table) %>% 
   left_join(phosp_pft_table) %>% 
   left_join(phosp_bloods_table) %>% 
-  left_join(phosp_hosp %>% select(study_id, crf1a_resp_support_4levels)) %>% 
+  left_join(phosp_hosp_3m %>% select(study_id, crf1a_resp_support_4levels)) %>% 
   left_join(phosp_cluster) %>% 
   select(dependent, explanatory_hrqol) %T>% 
   {data_in <<- .} %>% 
@@ -1213,7 +1473,7 @@ explanatory_occupation = c(
 )
 
 phosp_3m %>%
-  left_join(phosp_hosp %>% select(study_id, crf1a_resp_support_4levels, crf1b_healthcare_worker, crf1b_caring)) %>% 
+  left_join(phosp_hosp_3m %>% select(study_id, crf1a_resp_support_4levels, crf1b_healthcare_worker, crf1b_caring)) %>% 
   left_join(phosp_cluster) %>% 
   summary_factorlist(dependent,  explanatory_occupation,
                      na_include = TRUE, 
@@ -1227,7 +1487,7 @@ phosp_3m %>%
 
 ```{r}
 phosp_3m %>%
-  left_join(phosp_hosp %>% select(study_id, crf1a_resp_support_4levels, crf1b_healthcare_worker, crf1b_caring)) %>% 
+  left_join(phosp_hosp_3m %>% select(study_id, crf1a_resp_support_4levels, crf1b_healthcare_worker, crf1b_caring)) %>% 
   left_join(phosp_cluster) %>% 
   summary_factorlist(dependent,  explanatory_occupation,
                      na_include = TRUE, 
@@ -1304,9 +1564,234 @@ phosp_3m %>%
   filter(crp_result > 0 ) %>% 
   lmmulti("log(crp_result)", c("crf3a_bmi", "cluster")) %>% 
   summary()
+
 ```
 
+## Alluvial plot data
 
+```{r}
+# Data for alluvial plot
+alluvial = phosp_3m %>%  # n = 2320
+  select(study_id, psq_recovered) %>% 
+  full_join(phosp_12m %>% # n = 924
+              select(study_id, psq_recovered), 
+            by = c("study_id"), suffix = c(".6m", ".12m")) %>% 
+  group_by(psq_recovered.6m, psq_recovered.12m) %>% 
+  filter(!(is.na(psq_recovered.6m) & is.na(psq_recovered.12m))) %>% 
+  count() 
+# Matches alluvial. 
+```
 
+## Numbers by recoverd (Figure 1A)
+
+```{r}
+fig1a = phosp_3m %>%  
+  select(study_id, redcap_event_name, psq_recovered) %>% 
+  bind_rows(phosp_12m %>% 
+              select(study_id, redcap_event_name, psq_recovered)
+  ) %>% 
+  mutate(
+    psq_recovered = fct_relevel(psq_recovered, "Yes", "Not sure", "No"),
+    redcap_event_name = fct_recode(redcap_event_name,
+                                   "6 months" = "3 Months (1st Research Visit)", 
+                                     "12 months" = "12 Months (2nd Research Visit)")
+  ) %>% 
+  drop_na() %T>%
+  {plot_data <<- (.) %>% 
+    group_by(redcap_event_name) %>% 
+    count(psq_recovered) %>% 
+    arrange(as.character(psq_recovered), .by_group = TRUE) %>% 
+    mutate(
+      nn = sum(n), 
+      prop = n/nn,
+      cum = cumsum(prop),
+      pos = lag(cum, default = 0) + (prop/2)
+    )
+  } %>% 
+  ggplot_lancet(aes(x = redcap_event_name, fill = psq_recovered)) + 
+  geom_bar(position = "fill") +
+  geom_text(data = plot_data, aes(y = pos, label = n)) +
+  # geom_text(data = plot_data, aes(y = 1, label = n), position = position_fill(vjust = 0.8)) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::label_percent(suffix = "")) +
+  scale_fill_brewer(palette = "Paired", breaks = rev, direction = -1) +
+  labs(x = "", y = "Patient perceived recovery (%)", fill = "Do you feel fully \nrecovered from COVID-19?") +
+  theme(legend.position = "right") +
+  guides(fill = guide_legend(reverse = TRUE, nrow = 3,
+                             title.position = "top")) + 
+  ggtitle("Patient perceived recovery following COVID-19 hospital admission",
+          "Numbers are counts")
+# pdf 9 X 6
+```
+
+## Extract utility numbers
+
+```{r}
+phosp_utility = phosp %>% 
+  select(study_id, redcap_event_name, eq5d5l_utility_index_pre) %>%
+  filter(redcap_event_name != "Hospital Discharge") %>% 
+  
+  # Preferentially select 3 months >  6 weeks > 12 months for pre-covid utility index
+  mutate(redcap_event_name = fct_relevel(redcap_event_name,
+                                         "3 Months (1st Research Visit)")) %>% 
+  arrange(study_id, redcap_event_name) %>% 
+  drop_na() %>% 
+  group_by(study_id) %>% 
+  slice(1) %>% 
+  mutate(redcap_event_name = "Pre-COVID") %>% 
+  rename(eq5d5l_utility_index = eq5d5l_utility_index_pre) %>% 
+  bind_rows(
+    phosp_3m %>% 
+      select(study_id, redcap_event_name, eq5d5l_utility_index) %>% 
+      drop_na()
+  ) %>% 
+  bind_rows(
+    phosp_12m %>% 
+      select(study_id, redcap_event_name, eq5d5l_utility_index) %>% 
+      drop_na()
+  )
+```
+
+## EQ5D by recovered
+
+### Paired data
+
+```{r fig.height=5, fig.width=7}
+library(magrittr)
+paired_pal = RColorBrewer::brewer.pal(5, "Paired")
+paired_pal = c(paired_pal[5], paired_pal[1:3])
+
+study_id_6m_12m = phosp_3m %>% select(study_id) %>% 
+  bind_rows(phosp_12m %>% select(study_id)) %>% 
+  distinct(study_id) %>% 
+  pull(study_id)
+
+phosp_utility %>% 
+  left_join(phosp %>% select(study_id, redcap_event_name, psq_recovered)) %>% 
+  filter(study_id %in% paired_IDs) %>% 
+  # filter(study_id %in% study_id_6m_12m) %>% 
+  mutate(
+    psq_recovered = as.character(psq_recovered),
+    psq_recovered = if_else(redcap_event_name == "Pre-COVID", "Pre-COVID", psq_recovered) %>% 
+      factor(),  
+    psq_recovered = fct_relevel(psq_recovered, "Pre-COVID", "No", "Not sure", "Yes"),
+    redcap_event_name = factor(redcap_event_name,
+                                    levels = c("Pre-COVID", "3 Months (1st Research Visit)", 
+                                               "12 Months (2nd Research Visit)"))
+    ) %>%
+  ungroup() %>% 
+  drop_na() %T>%
+  {plot_data <<- count(., psq_recovered, redcap_event_name)} %>% 
+  ggplot_lancet(aes(x = fct_rev(psq_recovered), y = eq5d5l_utility_index, fill = psq_recovered)) +
+  geom_boxplot()  +
+  facet_grid(. ~ redcap_event_name, scale="free_x", space = "free_x") + 
+    
+  
+  geom_text(data = plot_data, aes(x = psq_recovered, y = -0.55, label = n),
+            position = position_dodge(width = 0.8), hjust = 0.5) +
+  scale_fill_manual(values = paired_pal) +
+  labs(x = "Patient perceived recovery", y = "EQ5D5l Utility Index") +
+  theme(legend.position = "none") +
+  ggtitle("Patient perceived recovery by EQ5Dl utility index",
+        "Paired data | Numbers are counts")
+# PDF 9x6
+```
+
+### Unpaired data (this is used)
+
+```{r fig.height=5, fig.width=7}
+library(magrittr)
+paired_pal = RColorBrewer::brewer.pal(5, "Paired")
+paired_pal = c(paired_pal[5], paired_pal[1:3])
+
+study_id_6m_12m = phosp_3m %>% select(study_id) %>% 
+  bind_rows(phosp_12m %>% select(study_id)) %>% 
+  distinct(study_id) %>% 
+  pull(study_id)
+
+fig1b = phosp_utility %>% 
+  left_join(phosp %>% select(study_id, redcap_event_name, psq_recovered)) %>% 
+  # filter(study_id %in% paired_IDs) %>% 
+  filter(study_id %in% study_id_6m_12m) %>% 
+  mutate(
+    psq_recovered = as.character(psq_recovered),
+    psq_recovered = if_else(redcap_event_name == "Pre-COVID", "Pre-COVID", psq_recovered) %>% 
+      factor(),  
+    psq_recovered = fct_relevel(psq_recovered, "Pre-COVID", "No", "Not sure", "Yes"),
+    redcap_event_name = factor(redcap_event_name,
+                                    levels = c("Pre-COVID", "3 Months (1st Research Visit)", 
+                                               "12 Months (2nd Research Visit)")) %>%
+      fct_recode("Pre-COVID" = "Pre-COVID", 
+                 "6 months (1st Research Visit)" = "3 Months (1st Research Visit)",
+                 "12 months (2nd Research Visit)" = "12 Months (2nd Research Visit)"
+        
+      )
+    ) %>%
+  ungroup() %>% 
+  drop_na() %T>%
+  {plot_data <<- count(., psq_recovered, redcap_event_name)} %>% 
+  ggplot_lancet(aes(x = fct_rev(psq_recovered), y = eq5d5l_utility_index, fill = psq_recovered)) +
+  geom_boxplot()  +
+  facet_grid(. ~ redcap_event_name, scale="free_x", space = "free_x") + 
+    
+  
+  geom_text(data = plot_data, aes(x = psq_recovered, y = -0.55, label = n),
+            position = position_dodge(width = 0.8), hjust = 0.5) +
+  scale_fill_manual(values = paired_pal) +
+  labs(x = "Patient perceived recovery", y = "EQ5D5l Utility Index") +
+  theme(legend.position = "none") +
+  ggtitle("Patient perceived recovery by EQ5Dl utility index",
+        "Numbers are counts")
+# PDF 9x6
+```
+
+## Recovered by cluster
+
+```{r fig.height=7, fig.width=8}
+fig1d = phosp_cluster %>% 
+  left_join(phosp_3m %>% select(study_id, redcap_event_name, psq_recovered) %>% 
+              bind_rows(phosp_12m %>% select(study_id, redcap_event_name, psq_recovered))
+  ) %>% 
+  ungroup() %>% 
+  mutate(
+    psq_recovered = fct_relevel(psq_recovered, "Yes", "Not sure", "No"),
+    redcap_event_name = fct_recode(redcap_event_name,
+                                   "6 months" = "3 Months (1st Research Visit)", 
+                                   "12 months" = "12 Months (2nd Research Visit)")
+  ) %>% 
+  drop_na() %T>%
+  {plot_data <<- (.) %>% 
+    group_by(redcap_event_name, cluster) %>% 
+    count(psq_recovered) %>% 
+    arrange(as.character(psq_recovered), .by_group = TRUE) %>% 
+    mutate(
+      nn = sum(n), 
+      prop = n/nn,
+      cum = cumsum(prop),
+      pos = lag(cum, default = 0) + (prop/2)
+    )
+  } %>% 
+  ggplot_lancet(aes(x = redcap_event_name, fill = psq_recovered)) + 
+  geom_bar(position = "fill") +
+  facet_wrap(. ~ cluster, labeller = labeller(cluster = label_wrap_gen(35))) +
+  geom_text(data = plot_data, aes(y = pos, label = n)) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::label_percent(suffix = "")) +
+  scale_fill_brewer(palette = "Paired", breaks = rev, direction = -1) +
+  labs(x = "", y = "Patient perceived recovery (%)", fill = "Do you feel fully\nrecovered from\nCOVID-19?") +
+  theme(legend.position = "right") +
+  guides(fill = guide_legend(reverse = TRUE, nrow = 3,
+                             title.position = "top")) + 
+  ggtitle("Patient perceived recovery following COVID-19 hospital admission by cluster",
+          "Numbers are counts")
+```
+
+## Make final composite plot
+
+```{r}
+cowplot::plot_grid(fig1a, fig1c, fig1d, fig1b, 
+                   labels = c("A", "B", "C", "D"))
+cowplot::plot_grid(fig1a + ggtitle("", ""), fig1c, fig1d + ggtitle("", ""), fig1b + ggtitle("", ""), 
+                   labels = c("A", "B", "C", "D"))
+# PDF 20 x 10
+```
 
 
