@@ -241,7 +241,7 @@ phosp_hosp_3m = phosp_hosp %>%
     )
 ```
 
-### Make psq_recovered and discharge to review in phosp_hosp 3 month data
+### Make psq_recovered and discharge to review in phosp_hosp 12 month data
 ```{r}
 phosp_hosp_12m = phosp_hosp %>% 
   left_join(phosp_12m %>% select(study_id, psq_recovered, discharge_to_review)) %>% 
@@ -415,20 +415,81 @@ saveRDS(phosp_hosp_12m_imputed, file = path)
 system(paste("chown :covid", path))
 ```
 
+### 12 month (no outcome)
+
+```{r eval=FALSE, include=FALSE}
+# Run mice
+set.seed(1)
+explanatory = c("age_admission", 
+                "crf1a_sex", 
+                "crf1b_eth_5levels", 
+                "imd_quintile",
+                "crf3a_bmi",
+                
+                "crf1a_resp_support_4levels",
+                
+                # Comorbidities - # None of these are imputed as missing considered absent
+                "no_comorbid",
+                "no_comorbid_3levels",
+                "crf1a_com_card", "crf1a_com_neupsy",
+                "crf1a_com_res", "crf1a_com_rheu",
+                "crf1a_com_gast", "crf1a_com_mer", 
+                "crf1a_com_mh", "crf1a_com_diab",
+                "crf1a_com_id",
+                
+                "crf1a_admission_duration",
+                
+                "crf1a_treat_ss", "crf1a_treat_at", "crf1a_treat_tdac",
+                "psq_recovered",
+                
+                "study_id",
+                "redcap_data_access_group",
+                
+                "discharge_to_review")
+
+
+# Choose not to impute missing values
+# for explanatory variable of interest and
+# outcome variable. 
+# But include in algorithm for imputation.
+predM = phosp_hosp_12m %>% 
+  select(explanatory) %>% 
+  missing_predictorMatrix(
+    drop_from_imputed = c("study_id", "redcap_data_access_group", "psq_recovered"), 
+    drop_from_imputer = c("study_id", "redcap_data_access_group", "discharge_to_review"))
+
+# This is needed to drop from imputed!
+m0 = mice(phosp_hosp_12m %>% 
+  select(explanatory), maxit=0)
+m0$method[c("study_id")] = ""
+m0$method[c("redcap_data_access_group")] = ""
+m0$method[c("psq_recovered")] = ""
+
+phosp_hosp_12m_no_outcome_imputed = phosp_hosp_12m %>% 
+  select(explanatory) %>% 
+  mice(m = 10, maxit = 10, predictorMatrix = predM, method = m0$method)
+
+plot(phosp_hosp_12m_no_outcome_imputed)
+summary(phosp_hosp_12m_no_outcome_imputed)
+path = paste0("/home/common/phosp/share/phosp_hosp_12m_no_outcome_imputed_", timestamp, ".rds") 
+saveRDS(phosp_hosp_12m_no_outcome_imputed, file = path)
+system(paste("chown :covid", path))
+```
+
 
 ## Paper 1 regression 
 
 ### 3 month multivariable logistic regression (with BMI 2 levels AND discharge_to_review)
 
 
-```{r}
+```{r eval=FALSE, include=FALSE}
 # Load mice sets
 path = paste0("/home/common/phosp/share/phosp_hosp_3m_imputed_", timestamp, ".rds") 
 phosp_hosp_3m_imputed = readRDS(path)
 ```
 
 
-```{r}
+```{r eval=FALSE, include=FALSE}
 dependent = "psq_recovered"
 explanatory = c("age_admission_factor", "crf1a_sex", "crf1b_eth_5levels", "imd_quintile", "no_comorbid_3levels", "crf3a_bmi_2levels", "crf1a_resp_support_4levels", "crf1a_treat_ss", "crf1a_treat_at", "crf1a_treat_tdac", "discharge_to_review")
 explanatory_multi = c("age_admission", "crf1a_sex", "crf1b_eth_5levels", "imd_quintile", "no_comorbid_3levels")
@@ -515,7 +576,7 @@ fit_cc %>%
 
 ## Figure: Multilevel logistic regression (multiple imputation)
 
-```{r fig.height=7, fig.width=12}
+```{r eval=FALSE, fig.height=7, fig.width=12, include=FALSE}
 dependent = "psq_recovered"
 explanatory = c("age_admission_factor", "crf1a_sex", "crf1b_eth_5levels", "imd_quintile", "no_comorbid_3levels", "crf3a_bmi_2levels", "crf1a_resp_support_4levels", "crf1a_treat_ss", "crf1a_treat_at", "crf1a_treat_tdac", "discharge_to_review")             
                                                                
@@ -530,11 +591,11 @@ fit = phosp_hosp_3m %>%
 
 ## Alternative figure with fewer variables (model the same)
 
-```{r fig.height=7, fig.width=12}
+```{r eval=FALSE, fig.height=7, fig.width=12, include=FALSE}
 dependent = "psq_recovered"
 explanatory = c("age_admission_factor", "crf1a_sex", "crf1b_eth_5levels", "imd_quintile", "no_comorbid_3levels", "crf3a_bmi_2levels", "crf1a_resp_support_4levels", "crf1a_treat_ss", "discharge_to_review")
 
-fig1c = phosp_hosp_3m %>%
+fit = phosp_hosp_3m %>%
   or_plot(dependent, explanatory, column_space = c(-0.5, 0.15, 0.5), table_text_size = 3.5, 
           glmfit = fit_mixed_imputed_pool, remove_ref = TRUE,
           dependent_label = "", suffix = "",
@@ -550,20 +611,46 @@ fig1c = phosp_hosp_3m %>%
 ### 12 month multivariable logistic regression (with BMI 2 levels AND discharge_to_review)
 
 
-```{r}
+```{r eval=FALSE, include=FALSE}
 # Load mice sets
 path = paste0("/home/common/phosp/share/phosp_hosp_12m_imputed_", timestamp, ".rds") 
 phosp_hosp_12m_imputed = readRDS(path)
 ```
 
 
-```{r}
+```{r eval=FALSE, include=FALSE}
 dependent = "psq_recovered"
 explanatory = c("age_admission_factor", "crf1a_sex", "crf1b_eth_5levels", "imd_quintile", "no_comorbid_3levels", "crf3a_bmi_2levels", "crf1a_resp_support_4levels", "crf1a_treat_ss", "crf1a_treat_at", "crf1a_treat_tdac", "discharge_to_review")
 explanatory_multi = c("age_admission", "crf1a_sex", "crf1b_eth_5levels", "imd_quintile", "no_comorbid_3levels")
 
 fit_cc = phosp_hosp_12m %>% 
   finalfit(dependent, explanatory, keep_fit_id = TRUE)
+
+# Double check numbers in final imputed model
+phosp_hosp_12m_imputed %>% 
+  mice::complete(1) %>% 
+  mutate(age_admission_factor = case_when(
+    age_admission < 30 ~ "<30",
+    age_admission < 40 ~ "30-39",
+    age_admission < 50 ~ "40-49",
+    age_admission < 60 ~ "50-59",
+    age_admission < 70 ~ "60-69",
+    age_admission < 80 ~ "70-79",
+    is.na(age_admission) ~ NA_character_,
+    TRUE ~ "80+"
+  ) %>% 
+    fct_relevel("50-59"),
+  
+  crf3a_bmi_2levels = case_when(
+    crf3a_bmi < 30 ~ "BMI < 30 kg/m^2",
+    is.na(crf3a_bmi) ~ NA_character_,
+    TRUE ~ "BMI 30+ kg/m^2"
+  ) %>% 
+    factor() %>% 
+    fct_relevel("BMI < 30 kg/m^2", "BMI 30+ kg/m^2") %>% 
+    ff_label("BMI (2 levels)")
+  ) %>% 
+  finalfit(dependent, explanatory, metrics = TRUE)
 
 fit_multi_imputed_pool = phosp_hosp_12m_imputed %>% 
   mice::complete("all") %>%
@@ -644,7 +731,7 @@ fit_cc %>%
 
 ## Figure: Multilevel logistic regression (multiple imputation)
 
-```{r fig.height=7, fig.width=12}
+```{r eval=FALSE, fig.height=7, fig.width=12, include=FALSE}
 dependent = "psq_recovered"
 explanatory = c("age_admission_factor", "crf1a_sex", "crf1b_eth_5levels", "imd_quintile", "no_comorbid_3levels", "crf3a_bmi_2levels", "crf1a_resp_support_4levels", "crf1a_treat_ss", "crf1a_treat_at", "crf1a_treat_tdac", "discharge_to_review")
 
@@ -659,9 +746,155 @@ fit = phosp_hosp_12m %>%
 
 ## Alternative figure with fewer variables (model the same)
 
-```{r fig.height=7, fig.width=12}
+```{r eval=FALSE, fig.height=7, fig.width=12, include=FALSE}
 dependent = "psq_recovered"
 explanatory = c("age_admission_factor", "crf1a_sex", "crf1b_eth_5levels", "imd_quintile", "no_comorbid_3levels", "crf3a_bmi_2levels", "crf1a_resp_support_4levels", "crf1a_treat_ss", "discharge_to_review")
+
+fit = phosp_hosp_12m %>%
+  or_plot(dependent, explanatory, column_space = c(-0.5, 0.15, 0.5), table_text_size = 3.5, 
+          glmfit = fit_mixed_imputed_pool, remove_ref = TRUE,
+          dependent_label = "", suffix = "",
+          breaks = c(0.2, 0.5, 1, 2, 5, 10, 30), )
+# PDF 10 x 9
+```
+
+
+
+
+## Paper 1 regression 
+
+### 12 month multivariable logistic regression (with BMI 2 levels AND discharge_to_review, NO OUTCOME)
+
+
+```{r}
+# Load mice sets
+path = paste0("/home/common/phosp/share/phosp_hosp_12m_no_outcome_imputed_", timestamp, ".rds") 
+phosp_hosp_12m_imputed = readRDS(path)
+```
+
+
+```{r}
+dependent = "psq_recovered"
+explanatory = c("age_admission_factor", "crf1a_sex", "crf1b_eth_5levels", "imd_quintile", "no_comorbid_3levels", "crf3a_bmi_2levels", "crf1a_resp_support_4levels", "crf1a_treat_ss", 
+                #"crf1a_treat_at", 
+                "crf1a_treat_tdac", "discharge_to_review")
+
+fit_cc = phosp_hosp_12m %>% 
+  finalfit(dependent, explanatory, keep_fit_id = TRUE)
+
+# Double check numbers in final imputed model
+phosp_hosp_12m_imputed %>% 
+  mice::complete(1) %>% 
+  mutate(age_admission_factor = case_when(
+    age_admission < 30 ~ "<30",
+    age_admission < 40 ~ "30-39",
+    age_admission < 50 ~ "40-49",
+    age_admission < 60 ~ "50-59",
+    age_admission < 70 ~ "60-69",
+    age_admission < 80 ~ "70-79",
+    is.na(age_admission) ~ NA_character_,
+    TRUE ~ "80+"
+  ) %>% 
+    fct_relevel("50-59"),
+  
+  crf3a_bmi_2levels = case_when(
+    crf3a_bmi < 30 ~ "BMI < 30 kg/m^2",
+    is.na(crf3a_bmi) ~ NA_character_,
+    TRUE ~ "BMI 30+ kg/m^2"
+  ) %>% 
+    factor() %>% 
+    fct_relevel("BMI < 30 kg/m^2", "BMI 30+ kg/m^2") %>% 
+    ff_label("BMI (2 levels)")
+  ) %>% 
+  finalfit(dependent, explanatory, metrics = TRUE)
+
+fit_multi_imputed_pool = phosp_hosp_12m_imputed %>% 
+  mice::complete("all") %>%
+  # Probably temp. Add age_admission_factor to imputed datasets
+  purrr::map(~ mutate(., 
+                      age_admission_factor = case_when(
+                        age_admission < 30 ~ "<30",
+                        age_admission < 40 ~ "30-39",
+                        age_admission < 50 ~ "40-49",
+                        age_admission < 60 ~ "50-59",
+                        age_admission < 70 ~ "60-69",
+                        age_admission < 80 ~ "70-79",
+                        is.na(age_admission) ~ NA_character_,
+                        TRUE ~ "80+"
+                      ) %>% 
+                        fct_relevel("50-59"),
+                      
+                      crf3a_bmi_2levels = case_when(
+                        crf3a_bmi < 30 ~ "BMI < 30 kg/m^2",
+                        is.na(crf3a_bmi) ~ NA_character_,
+                        TRUE ~ "BMI 30+ kg/m^2"
+                      ) %>% 
+                        factor() %>% 
+                        fct_relevel("BMI < 30 kg/m^2", "BMI 30+ kg/m^2") %>% 
+                        ff_label("BMI (2 levels)")
+  )
+  ) %>% 
+  purrr::map(~ glmmulti(.x, dependent, explanatory)) %>%
+  as.mira() %>% 
+  pool()
+
+
+# Multilevel
+library(broom.mixed)
+fit_mixed_imputed_pool = phosp_hosp_12m_imputed %>% 
+  mice::complete("all") %>%
+  # Probably temp. Add age_admission_factor to imputed datasets
+  purrr::map(~ mutate(., 
+               age_admission_factor = case_when(
+                 age_admission < 30 ~ "<30",
+                 age_admission < 40 ~ "30-39",
+                 age_admission < 50 ~ "40-49",
+                 age_admission < 60 ~ "50-59",
+                 age_admission < 70 ~ "60-69",
+                 age_admission < 80 ~ "70-79",
+                 is.na(age_admission) ~ NA_character_,
+                 TRUE ~ "80+"
+               ) %>% 
+                 fct_relevel("50-59"),
+               
+               crf3a_bmi_2levels = case_when(
+                 crf3a_bmi < 30 ~ "BMI < 30 kg/m^2",
+                 is.na(crf3a_bmi) ~ NA_character_,
+                 TRUE ~ "BMI 30+ kg/m^2"
+               ) %>% 
+                 factor() %>% 
+                 fct_relevel("BMI < 30 kg/m^2", "BMI 30+ kg/m^2") %>% 
+                 ff_label("BMI (2 levels)")
+  ) %>% 
+    select(dependent, explanatory, redcap_data_access_group) %>% 
+    drop_na() %>% 
+    mutate(redcap_data_access_group = fct_lump_min(redcap_data_access_group, 40) # Lump hospitals with fewer than 10 patients
+    )
+  ) %>% 
+  purrr::map(~ glmmixed(.x, dependent, explanatory, random_effect = "redcap_data_access_group")) %>%
+  as.mira() %>% 
+  pool()
+
+fit_multi_imputed = fit_multi_imputed_pool%>% 
+  fit2df(estimate_name = "OR (multivariable imputation)", exp = TRUE)
+
+fit_mixed_imputed = fit_mixed_imputed_pool%>% 
+  fit2df(estimate_name = "OR (multilevel imputation)", exp = TRUE)
+  
+fit_cc %>% 
+  # ff_merge(fit_uni_imputed) %>% 
+  ff_merge(fit_multi_imputed) %>% 
+  ff_merge(fit_mixed_imputed, last_merge = TRUE) %>% 
+  # dplyr::relocate(1, 2, 3, 4, 5, 7, 6, 8) %>% 
+  mytable()
+```
+
+
+## Figure: Multilevel logistic regression (multiple imputation)
+
+```{r fig.height=7, fig.width=12}
+dependent = "psq_recovered"
+explanatory = c("age_admission_factor", "crf1a_sex", "crf1b_eth_5levels", "imd_quintile", "no_comorbid_3levels", "crf3a_bmi_2levels", "crf1a_resp_support_4levels", "crf1a_treat_ss", "crf1a_treat_at", "crf1a_treat_tdac", "discharge_to_review")
 
 fit = phosp_hosp_12m %>%
   or_plot(dependent, explanatory, column_space = c(-0.5, 0.15, 0.5), table_text_size = 4, 
@@ -670,6 +903,23 @@ fit = phosp_hosp_12m %>%
           breaks = c(0.2, 0.5, 1, 2, 5, 10, 30), )
 # PDF 10 x 9
 ```
+
+
+## Alternative figure with fewer variables (model the same)
+### This is figure that is used in paper (09/12/21) EMH
+
+```{r fig.height=7, fig.width=12}
+dependent = "psq_recovered"
+explanatory = c("age_admission_factor", "crf1a_sex", "crf1b_eth_5levels", "imd_quintile", "no_comorbid_3levels", "crf3a_bmi_2levels", "crf1a_resp_support_4levels", "crf1a_treat_ss", "discharge_to_review")
+
+fig1c = phosp_hosp_12m %>%
+  or_plot(dependent, explanatory, column_space = c(-0.5, 0.15, 0.5), table_text_size = 3.5, 
+          glmfit = fit_mixed_imputed_pool, remove_ref = TRUE,
+          dependent_label = "", suffix = "",
+          breaks = c(0.2, 0.5, 1, 2, 5, 10, 30), )
+# PDF 10 x 9
+```
+
 
 
 
@@ -770,10 +1020,10 @@ phosp_cluster = data_in %>%
   mutate(cluster = clara_result$clustering %>% 
            factor(levels = c(1, 2, 3, 4),
                   labels = c(
-                    "1: Very severe mental/physical impairment",
-                    "2: Severe mental/physical impairment",
-                    "3: Moderate mental/physical impairment + poor cognition",
-                    "4: Mild impairment"),
+                    "1: Very severe",
+                    "2: Severe",
+                    "3: Moderate/cognitive",
+                    "4: Mild"),
            )) %>% 
   select(study_id, cluster)
 ```
@@ -1604,8 +1854,8 @@ fig1a = phosp_3m %>%
   mutate(
     psq_recovered = fct_relevel(psq_recovered, "Yes", "Not sure", "No"),
     redcap_event_name = fct_recode(redcap_event_name,
-                                   "6 months" = "3 Months (1st Research Visit)", 
-                                     "12 months" = "12 Months (2nd Research Visit)")
+                                   "5 months" = "3 Months (1st Research Visit)", 
+                                     "One year" = "12 Months (2nd Research Visit)")
   ) %>% 
   drop_na() %T>%
   {plot_data <<- (.) %>% 
@@ -1732,8 +1982,8 @@ fig1b = phosp_utility %>%
                                     levels = c("Pre-COVID", "3 Months (1st Research Visit)", 
                                                "12 Months (2nd Research Visit)")) %>%
       fct_recode("Pre-COVID" = "Pre-COVID", 
-                 "6 months (1st Research Visit)" = "3 Months (1st Research Visit)",
-                 "12 months (2nd Research Visit)" = "12 Months (2nd Research Visit)"
+                 "5 months (1st Research Visit)" = "3 Months (1st Research Visit)",
+                 "One year (2nd Research Visit)" = "12 Months (2nd Research Visit)"
         
       )
     ) %>%
@@ -1766,8 +2016,8 @@ fig1d = phosp_cluster %>%
   mutate(
     psq_recovered = fct_relevel(psq_recovered, "Yes", "Not sure", "No"),
     redcap_event_name = fct_recode(redcap_event_name,
-                                   "6 months" = "3 Months (1st Research Visit)", 
-                                   "12 months" = "12 Months (2nd Research Visit)")
+                                   "5 months" = "3 Months (1st Research Visit)", 
+                                   "One year" = "12 Months (2nd Research Visit)")
   ) %>% 
   drop_na() %T>%
   {plot_data <<- (.) %>% 
@@ -1802,7 +2052,7 @@ cowplot::plot_grid(fig1a, fig1c, fig1d, fig1b,
                    labels = c("A", "B", "C", "D"))
 cowplot::plot_grid(fig1a + ggtitle("", ""), fig1c, fig1d + ggtitle("", ""), fig1b + ggtitle("", ""), 
                    labels = c("A", "B", "C", "D"))
-# PDF 20 x 10
+# PDF 21 x 10
 ```
 
 
