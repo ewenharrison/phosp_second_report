@@ -1017,7 +1017,9 @@ clara_result$medoids %>%
 
 ```{r}
 phosp_cluster = data_in %>% 
-  mutate(cluster = clara_result$clustering %>% 
+  mutate(
+    cluster_numeric = clara_result$clustering,
+    cluster = clara_result$clustering %>% 
            factor(levels = c(1, 2, 3, 4),
                   labels = c(
                     "1: Very severe",
@@ -1025,7 +1027,9 @@ phosp_cluster = data_in %>%
                     "3: Moderate/cognitive",
                     "4: Mild"),
            )) %>% 
-  select(study_id, cluster)
+  select(study_id, cluster, cluster_numeric)
+# saveRDS(phosp_cluster, paste0("/home/common/phosp/share/phosp_cluster_", timestamp, ".rds"))
+# system("chown :covid /home/common/phosp/share -R")
 ```
 
 ## Cluster medoids (z-scores)  
