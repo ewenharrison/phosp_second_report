@@ -282,6 +282,179 @@ phosp_wt = phosp %>%
 source("https://raw.githubusercontent.com/SurgicalInformatics/phosp_clean/main/05_kco.R")
 ```
 
+## Weighting for final outcome
+Added 22/02/2022
+
+```{r}
+phosp_12m %>% 
+  count(psq_recovered) %>% 
+  mutate(
+    nn = sum(n),
+    prop = n/nn
+  )
+
+phosp_12m %>% 
+  summary_factorlist(explanatory = "psq_recovered")
+```
+
+```{r}
+phosp_12m %>% 
+  summarise(
+    max = max(crf1a_date_dis),
+    min = min(crf1a_date_dis)
+  )
+
+study_id_12m = phosp_12m %>% 
+  distinct(study_id) %>% 
+  pull(study_id)
+```
+
+```{r}
+explanatory = c("age_admission", 
+                "crf1a_sex", 
+                "crf1b_eth_5levels", 
+                "imd_quintile",
+                #"crf3a_bmi",
+                
+                "crf1a_resp_support_4levels",
+                
+                # Comorbidities - # None of these are imputed as missing considered absent
+                "no_comorbid",
+                "crf1a_com_card", "crf1a_com_neupsy",
+                "crf1a_com_res", "crf1a_com_rheu",
+                "crf1a_com_gast", "crf1a_com_mer", 
+                "crf1a_com_mh", "crf1a_com_diab",
+                # "crf1a_com_id",
+                
+                "crf1a_admission_duration")#,
+                
+                #"crf1a_treat_ss", "crf1a_treat_at", "crf1a_treat_tdac")
+
+phosp_iptw = phosp_hosp_12m %>% 
+  filter(!study_id %in% study_id_12m) %>% 
+  filter(crf1a_date_dis >= ymd(200228)) %>% 
+  filter(crf1a_date_dis <= ymd(201128)) %>% 
+  select(study_id, psq_recovered, explanatory) %>% 
+  mutate(group_fu = 0) %>% 
+  bind_rows(
+    phosp_hosp_12m %>% 
+      filter(study_id %in% study_id_12m) %>% 
+      select(study_id, psq_recovered, explanatory) %>% 
+      mutate(group_fu = 1)   
+  )
+phosp_iptw  %>% 
+  count(group_fu)
+
+
+phosp_iptw %>% 
+  summary_factorlist(explanatory = "psq_recovered")
+
+```
+
+```{r}
+phosp_iptw %>% 
+  summary_factorlist(NULL, explanatory, na_include = TRUE, add_row_totals = TRUE)
+
+phosp_iptw %>% 
+  missing_glimpse()
+
+phosp_iptw = phosp_iptw %>% 
+  drop_na(-psq_recovered)
+# all present
+
+# Numerator model
+fit_num = phosp_iptw %>% 
+  glmmulti("group_fu", 1)
+
+# Demoninator model
+fit_dem = phosp_iptw %>% 
+  glmmulti("group_fu", explanatory)
+
+fit_dem %>% 
+  fit2df()
+
+phosp_w = phosp_iptw %>% 
+  mutate(
+    p = predict(fit_num, type = "response"),
+    pi = predict(fit_dem, type = "response"),
+    weights = case_when(
+      group_fu == 1 ~ p / pi,
+        group_fu == 0 ~ (1-p) / (1-pi) 
+    )
+  )
+
+mean(phosp_w$weights)
+# Whoop whoop!
+
+phosp_iptw %>% 
+  summary_factorlist(explanatory = "psq_recovered")
+
+phosp_w %>% 
+  mutate(
+    psq_recovered_wgt = (as.numeric(psq_recovered) - 1) * weights
+    ) %>% 
+  summary_factorlist(explanatory = c("psq_recovered", "psq_recovered_wgt"), digits = c(4, 4, 3, 1) )
+```
+
+## Do the same things as above but with imputed data. 
+
+```{r}
+library(mice)
+# Run mice
+set.seed(1)
+phosp_iptw = phosp_hosp_12m %>% 
+  filter(!study_id %in% study_id_12m) %>% 
+  filter(crf1a_date_dis >= ymd(200228)) %>% 
+  filter(crf1a_date_dis <= ymd(201128)) %>% 
+  select(study_id, psq_recovered, explanatory) %>% 
+  mutate(group_fu = 0) %>% 
+  bind_rows(
+    phosp_hosp_12m %>% 
+      filter(study_id %in% study_id_12m) %>% 
+      select(study_id, psq_recovered, explanatory) %>% 
+      mutate(group_fu = 1)   
+  )
+
+# Choose not to impute missing values
+# for explanatory variable of interest and
+# outcome variable. 
+# But include in algorithm for imputation.
+predM = phosp_iptw  %>% 
+  select(psq_recovered, explanatory) %>% 
+  missing_predictorMatrix(
+    drop_from_imputed = c(""), 
+    drop_from_imputer = c(""))
+
+# This is needed to drop from imputed!
+m0 = mice(phosp_hosp_3m %>% 
+  select(psq_recovered, explanatory), maxit=0)
+# m0$method[c("study_id")] = ""
+# m0$method[c("redcap_data_access_group")] = ""
+
+phosp_iptw_imputed = phosp_iptw %>% 
+  select(psq_recovered, explanatory) %>% 
+  mice(m = 10, maxit = 10, predictorMatrix = predM, method = m0$method)
+
+plot(phosp_iptw_imputed)
+summary(phosp_iptw_imputed)
+
+phosp_iptw_imputed %>% 
+  complete("all") %>% 
+  map(~ (.) %>% count(psq_recovered) %>% 
+        mutate(nn = sum(n),
+               prop = n/nn) %>% 
+        select(-psq_recovered)) %>% 
+  reduce(`+`) / 10
+
+```
+
+
+
+
+```
+
+
+
 ## Impute missing data including psq_recovered
 
 ### 3 month 
